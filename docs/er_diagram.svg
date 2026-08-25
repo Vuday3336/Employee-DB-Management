@@ -1,0 +1,267 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 900" width="1120" height="900" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <title>EmpCore — Mongoose schema relationships</title>
+  <desc>Entity relationship diagram for the EmpCore employee management system.</desc>
+
+  <style>
+    .bg      { fill: #ffffff; }
+    .box     { fill: #ffffff; stroke: #d5d9e2; stroke-width: 1.5; }
+    .hdr-core{ fill: #1f45e4; }
+    .hdr-txn { fill: #2f7a5b; }
+    .hdr-sys { fill: #515c75; }
+    .hdr-cfg { fill: #8591aa; }
+    .hdr-t   { fill: #ffffff; font-size: 13px; font-weight: 700; }
+    .fld     { fill: #191d27; font-size: 11.5px; }
+    .typ     { fill: #66738f; font-size: 10.5px; }
+    .key     { fill: #1f45e4; font-size: 10px; font-weight: 700; }
+    .uniq    { fill: #8591aa; font-size: 10px; font-style: italic; }
+    .edge    { stroke: #8591aa; stroke-width: 1.5; fill: none; }
+    .edge-d  { stroke: #b0b8c9; stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; }
+    .card    { fill: #515c75; font-size: 10.5px; font-weight: 600; }
+    .note    { fill: #66738f; font-size: 11px; }
+    .title   { fill: #191d27; font-size: 18px; font-weight: 700; }
+    .sub     { fill: #66738f; font-size: 12px; }
+    .sep     { stroke: #eceef2; stroke-width: 1; }
+
+    @media (prefers-color-scheme: dark) {
+      .bg    { fill: #0f1219; }
+      .box   { fill: #191d27; stroke: #3a4051; }
+      .fld   { fill: #eceef2; }
+      .typ   { fill: #8591aa; }
+      .key   { fill: #8eb5ff; }
+      .uniq  { fill: #66738f; }
+      .edge  { stroke: #66738f; }
+      .edge-d{ stroke: #515c75; }
+      .card  { fill: #b0b8c9; }
+      .note  { fill: #8591aa; }
+      .title { fill: #f6f7f9; }
+      .sub   { fill: #8591aa; }
+      .sep   { stroke: #2a2f3d; }
+      .hdr-core { fill: #1a35b8; }
+      .hdr-txn  { fill: #205c45; }
+      .hdr-sys  { fill: #434b5f; }
+      .hdr-cfg  { fill: #515c75; }
+    }
+  </style>
+
+  <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#8591aa" />
+  </marker>
+
+  <rect class="bg" width="1120" height="900" />
+
+  <text class="title" x="30" y="34">EmpCore — Mongoose schema relationships</text>
+  <text class="sub" x="30" y="53">Arrows point from the document holding the ObjectId reference to the document it references.</text>
+
+  <!-- ============================== User ============================== -->
+  <g>
+    <rect class="box" x="30" y="80" width="250" height="180" rx="8" />
+    <path class="hdr-core" d="M30 88 a8 8 0 0 1 8 -8 h234 a8 8 0 0 1 8 8 v22 h-250 z" />
+    <text class="hdr-t" x="42" y="103">User</text>
+    <text class="typ" x="268" y="103" text-anchor="end" fill="#bcd3ff">authentication</text>
+
+    <text class="fld" x="42" y="128">_id</text><text class="key" x="268" y="128" text-anchor="end">PK</text>
+    <text class="fld" x="42" y="148">email</text><text class="typ" x="268" y="148" text-anchor="end">String · unique</text>
+    <text class="fld" x="42" y="168">passwordHash</text><text class="typ" x="268" y="168" text-anchor="end">String · bcrypt</text>
+    <text class="fld" x="42" y="188">role</text><text class="typ" x="268" y="188" text-anchor="end">admin|manager|employee</text>
+    <text class="fld" x="42" y="208">employee</text><text class="key" x="268" y="208" text-anchor="end">FK → Employee</text>
+    <text class="fld" x="42" y="228">isActive</text><text class="typ" x="268" y="228" text-anchor="end">Boolean</text>
+    <text class="fld" x="42" y="248">tokenVersion</text><text class="typ" x="268" y="248" text-anchor="end">Number · revokes JWTs</text>
+  </g>
+
+  <!-- ========================== Notification ========================== -->
+  <g>
+    <rect class="box" x="30" y="300" width="250" height="140" rx="8" />
+    <path class="hdr-sys" d="M30 308 a8 8 0 0 1 8 -8 h234 a8 8 0 0 1 8 8 v22 h-250 z" />
+    <text class="hdr-t" x="42" y="323">Notification</text>
+
+    <text class="fld" x="42" y="348">user</text><text class="key" x="268" y="348" text-anchor="end">FK → User</text>
+    <text class="fld" x="42" y="368">type</text><text class="typ" x="268" y="368" text-anchor="end">leave_* | review_*</text>
+    <text class="fld" x="42" y="388">title / message</text><text class="typ" x="268" y="388" text-anchor="end">String</text>
+    <text class="fld" x="42" y="408">readAt</text><text class="typ" x="268" y="408" text-anchor="end">Date · nullable</text>
+    <text class="uniq" x="42" y="428">TTL index — expires after 90 days</text>
+  </g>
+
+  <!-- ============================= AuditLog =========================== -->
+  <g>
+    <rect class="box" x="30" y="480" width="250" height="160" rx="8" />
+    <path class="hdr-sys" d="M30 488 a8 8 0 0 1 8 -8 h234 a8 8 0 0 1 8 8 v22 h-250 z" />
+    <text class="hdr-t" x="42" y="503">AuditLog</text>
+    <text class="typ" x="268" y="503" text-anchor="end" fill="#d5d9e2">append-only</text>
+
+    <text class="fld" x="42" y="528">actor</text><text class="key" x="268" y="528" text-anchor="end">FK → User</text>
+    <text class="fld" x="42" y="548">action</text><text class="typ" x="268" y="548" text-anchor="end">e.g. leave.approved</text>
+    <text class="fld" x="42" y="568">entity / entityId</text><text class="typ" x="268" y="568" text-anchor="end">String · ObjectId</text>
+    <text class="fld" x="42" y="588">changes</text><text class="typ" x="268" y="588" text-anchor="end">{ field: from → to }</text>
+    <text class="fld" x="42" y="608">outcome</text><text class="typ" x="268" y="608" text-anchor="end">success|denied|error</text>
+    <text class="uniq" x="42" y="628">TTL index — expires after 2 years</text>
+  </g>
+
+  <!-- ============================== Holiday =========================== -->
+  <g>
+    <rect class="box" x="30" y="690" width="250" height="120" rx="8" />
+    <path class="hdr-cfg" d="M30 698 a8 8 0 0 1 8 -8 h234 a8 8 0 0 1 8 8 v22 h-250 z" />
+    <text class="hdr-t" x="42" y="713">Holiday</text>
+    <text class="typ" x="268" y="713" text-anchor="end" fill="#eceef2">configuration</text>
+
+    <text class="fld" x="42" y="738">name</text><text class="typ" x="268" y="738" text-anchor="end">String</text>
+    <text class="fld" x="42" y="758">date</text><text class="typ" x="268" y="758" text-anchor="end">Date · unique</text>
+    <text class="fld" x="42" y="778">region</text><text class="typ" x="268" y="778" text-anchor="end">String</text>
+    <text class="uniq" x="42" y="798">No refs — read by the day calculators</text>
+  </g>
+
+  <!-- ============================ Department ========================== -->
+  <g>
+    <rect class="box" x="390" y="80" width="290" height="140" rx="8" />
+    <path class="hdr-core" d="M390 88 a8 8 0 0 1 8 -8 h274 a8 8 0 0 1 8 8 v22 h-290 z" />
+    <text class="hdr-t" x="402" y="103">Department</text>
+
+    <text class="fld" x="402" y="128">_id</text><text class="key" x="668" y="128" text-anchor="end">PK</text>
+    <text class="fld" x="402" y="148">name / code</text><text class="typ" x="668" y="148" text-anchor="end">String · unique</text>
+    <text class="fld" x="402" y="168">manager</text><text class="key" x="668" y="168" text-anchor="end">FK → Employee</text>
+    <text class="fld" x="402" y="188">costCenter</text><text class="typ" x="668" y="188" text-anchor="end">String</text>
+    <text class="fld" x="402" y="208">isActive</text><text class="typ" x="668" y="208" text-anchor="end">Boolean · archive flag</text>
+  </g>
+
+  <!-- ============================= Employee =========================== -->
+  <g>
+    <rect class="box" x="390" y="280" width="290" height="280" rx="8" />
+    <path class="hdr-core" d="M390 288 a8 8 0 0 1 8 -8 h274 a8 8 0 0 1 8 8 v22 h-290 z" />
+    <text class="hdr-t" x="402" y="303">Employee</text>
+    <text class="typ" x="668" y="303" text-anchor="end" fill="#bcd3ff">core record</text>
+
+    <text class="fld" x="402" y="328">_id</text><text class="key" x="668" y="328" text-anchor="end">PK</text>
+    <text class="fld" x="402" y="348">employeeCode</text><text class="typ" x="668" y="348" text-anchor="end">String · unique</text>
+    <text class="fld" x="402" y="368">firstName / lastName</text><text class="typ" x="668" y="368" text-anchor="end">String · text index</text>
+    <text class="fld" x="402" y="388">workEmail</text><text class="typ" x="668" y="388" text-anchor="end">String · unique</text>
+    <text class="fld" x="402" y="408">department</text><text class="key" x="668" y="408" text-anchor="end">FK → Department</text>
+    <text class="fld" x="402" y="428">jobTitle</text><text class="typ" x="668" y="428" text-anchor="end">String</text>
+    <text class="fld" x="402" y="448">manager</text><text class="key" x="668" y="448" text-anchor="end">FK → Employee (self)</text>
+    <text class="fld" x="402" y="468">hireDate</text><text class="typ" x="668" y="468" text-anchor="end">Date</text>
+    <text class="fld" x="402" y="488">status</text><text class="typ" x="668" y="488" text-anchor="end">active … terminated</text>
+    <text class="fld" x="402" y="508">salary</text><text class="typ" x="668" y="508" text-anchor="end">Number · redacted</text>
+    <text class="fld" x="402" y="528">leaveBalances[]</text><text class="typ" x="668" y="528" text-anchor="end">embedded sub-document</text>
+    <text class="fld" x="402" y="548">deletedAt</text><text class="typ" x="668" y="548" text-anchor="end">Date · soft delete</text>
+  </g>
+
+  <!-- ============================ LeavePolicy ========================= -->
+  <g>
+    <rect class="box" x="390" y="620" width="290" height="140" rx="8" />
+    <path class="hdr-cfg" d="M390 628 a8 8 0 0 1 8 -8 h274 a8 8 0 0 1 8 8 v22 h-290 z" />
+    <text class="hdr-t" x="402" y="643">LeavePolicy</text>
+    <text class="typ" x="668" y="643" text-anchor="end" fill="#eceef2">configuration</text>
+
+    <text class="fld" x="402" y="668">type</text><text class="typ" x="668" y="668" text-anchor="end">String · unique</text>
+    <text class="fld" x="402" y="688">annualQuota / accrues</text><text class="typ" x="668" y="688" text-anchor="end">Number · Boolean</text>
+    <text class="fld" x="402" y="708">minNoticeDays</text><text class="typ" x="668" y="708" text-anchor="end">Number</text>
+    <text class="fld" x="402" y="728">maxConsecutiveDays</text><text class="typ" x="668" y="728" text-anchor="end">Number</text>
+    <text class="fld" x="402" y="748">isPaid</text><text class="typ" x="668" y="748" text-anchor="end">Boolean · consumes balance</text>
+  </g>
+
+  <!-- ============================ Attendance ========================== -->
+  <g>
+    <rect class="box" x="790" y="80" width="300" height="180" rx="8" />
+    <path class="hdr-txn" d="M790 88 a8 8 0 0 1 8 -8 h284 a8 8 0 0 1 8 8 v22 h-300 z" />
+    <text class="hdr-t" x="802" y="103">Attendance</text>
+
+    <text class="fld" x="802" y="128">_id</text><text class="key" x="1078" y="128" text-anchor="end">PK</text>
+    <text class="fld" x="802" y="148">employee</text><text class="key" x="1078" y="148" text-anchor="end">FK → Employee</text>
+    <text class="fld" x="802" y="168">date</text><text class="typ" x="1078" y="168" text-anchor="end">Date · UTC midnight</text>
+    <text class="fld" x="802" y="188">status</text><text class="typ" x="1078" y="188" text-anchor="end">present|late|absent|…</text>
+    <text class="fld" x="802" y="208">checkIn / checkOut</text><text class="typ" x="1078" y="208" text-anchor="end">Date</text>
+    <text class="fld" x="802" y="228">workedMinutes</text><text class="typ" x="1078" y="228" text-anchor="end">Number · derived</text>
+    <text class="uniq" x="802" y="248">UNIQUE (employee, date) — one row per day</text>
+  </g>
+
+  <!-- =========================== LeaveRequest ========================= -->
+  <g>
+    <rect class="box" x="790" y="300" width="300" height="200" rx="8" />
+    <path class="hdr-txn" d="M790 308 a8 8 0 0 1 8 -8 h284 a8 8 0 0 1 8 8 v22 h-300 z" />
+    <text class="hdr-t" x="802" y="323">LeaveRequest</text>
+    <text class="typ" x="1078" y="323" text-anchor="end" fill="#c9e7d9">state machine</text>
+
+    <text class="fld" x="802" y="348">_id</text><text class="key" x="1078" y="348" text-anchor="end">PK</text>
+    <text class="fld" x="802" y="368">employee</text><text class="key" x="1078" y="368" text-anchor="end">FK → Employee</text>
+    <text class="fld" x="802" y="388">type</text><text class="typ" x="1078" y="388" text-anchor="end">annual|sick|casual|…</text>
+    <text class="fld" x="802" y="408">startDate / endDate</text><text class="typ" x="1078" y="408" text-anchor="end">Date</text>
+    <text class="fld" x="802" y="428">days</text><text class="typ" x="1078" y="428" text-anchor="end">Number · business days</text>
+    <text class="fld" x="802" y="448">status</text><text class="typ" x="1078" y="448" text-anchor="end">pending→approved|rejected</text>
+    <text class="fld" x="802" y="468">approvedBy</text><text class="key" x="1078" y="468" text-anchor="end">FK → User</text>
+    <text class="fld" x="802" y="488">history[]</text><text class="typ" x="1078" y="488" text-anchor="end">every transition, appended</text>
+  </g>
+
+  <!-- ======================== PerformanceReview ======================= -->
+  <g>
+    <rect class="box" x="790" y="540" width="300" height="200" rx="8" />
+    <path class="hdr-txn" d="M790 548 a8 8 0 0 1 8 -8 h284 a8 8 0 0 1 8 8 v22 h-300 z" />
+    <text class="hdr-t" x="802" y="563">PerformanceReview</text>
+
+    <text class="fld" x="802" y="588">_id</text><text class="key" x="1078" y="588" text-anchor="end">PK</text>
+    <text class="fld" x="802" y="608">employee</text><text class="key" x="1078" y="608" text-anchor="end">FK → Employee</text>
+    <text class="fld" x="802" y="628">reviewer</text><text class="key" x="1078" y="628" text-anchor="end">FK → Employee</text>
+    <text class="fld" x="802" y="648">period</text><text class="typ" x="1078" y="648" text-anchor="end">{ year, quarter }</text>
+    <text class="fld" x="802" y="668">scores[]</text><text class="typ" x="1078" y="668" text-anchor="end">[{ competency, 1–5 }]</text>
+    <text class="fld" x="802" y="688">rating</text><text class="typ" x="1078" y="688" text-anchor="end">Number · mean of scores</text>
+    <text class="fld" x="802" y="708">status</text><text class="typ" x="1078" y="708" text-anchor="end">draft|submitted|acknowledged</text>
+    <text class="uniq" x="802" y="728">UNIQUE (employee, period.year, period.quarter)</text>
+  </g>
+
+  <!-- ============================== edges ============================= -->
+
+  <!-- User.employee → Employee (1:1) -->
+  <path class="edge" marker-end="url(#arrow)" d="M 280 208 H 340 V 330 H 390" />
+  <text class="card" x="300" y="200">1 : 1</text>
+
+  <!-- Notification.user → User (N:1) -->
+  <path class="edge" marker-end="url(#arrow)" d="M 120 300 V 260" />
+  <text class="card" x="128" y="284">N : 1</text>
+
+  <!-- AuditLog.actor → User (N:1) — routed along the left margin -->
+  <path class="edge" marker-end="url(#arrow)" d="M 30 540 H 14 V 178 H 30" />
+  <text class="card" x="20" y="360" transform="rotate(-90 20 360)">N : 1</text>
+
+  <!-- Employee.department → Department (N:1) -->
+  <path class="edge" marker-end="url(#arrow)" d="M 460 280 V 220" />
+  <text class="card" x="392" y="254">N : 1</text>
+
+  <!-- Department.manager → Employee (1:1) -->
+  <path class="edge" marker-end="url(#arrow)" d="M 610 220 V 280" />
+  <text class="card" x="618" y="254">1 : 1</text>
+
+  <!-- Employee.manager → Employee (self-reference, 1:N) -->
+  <path class="edge" marker-end="url(#arrow)" d="M 390 448 H 356 V 490 H 390" />
+  <text class="card" x="300" y="466">self 1:N</text>
+  <text class="note" x="300" y="484" font-size="9.5">$graphLookup</text>
+
+  <!-- Attendance.employee → Employee (N:1) -->
+  <path class="edge" marker-end="url(#arrow)" d="M 790 148 H 740 V 348 H 680" />
+  <text class="card" x="746" y="140">N : 1</text>
+
+  <!-- LeaveRequest.employee → Employee (N:1) -->
+  <path class="edge" marker-end="url(#arrow)" d="M 790 368 H 722 V 390 H 680" />
+  <text class="card" x="728" y="360">N : 1</text>
+
+  <!-- PerformanceReview.employee → Employee (N:1) -->
+  <path class="edge" marker-end="url(#arrow)" d="M 790 608 H 706 V 430 H 680" />
+  <text class="card" x="712" y="600">N : 1</text>
+
+  <!-- PerformanceReview.reviewer → Employee (N:1) -->
+  <path class="edge" marker-end="url(#arrow)" d="M 790 628 H 694 V 470 H 680" />
+  <text class="card" x="700" y="644">N : 1</text>
+
+  <!-- LeaveRequest.approvedBy → User (N:1) — routed under the diagram -->
+  <path class="edge" marker-end="url(#arrow)" d="M 790 468 H 762 V 850 H 310 V 238 H 280" />
+  <text class="card" x="540" y="843">N : 1  approvedBy</text>
+
+  <!-- LeavePolicy governs LeaveRequest (validation, not a ref) -->
+  <path class="edge-d" d="M 680 668 H 736 V 430 H 790" />
+  <text class="note" x="690" y="660" font-size="10">validates</text>
+
+  <!-- ============================== legend ============================ -->
+  <g>
+    <rect class="box" x="30" y="838" width="250" height="46" rx="6" />
+    <line class="edge" x1="44" y1="855" x2="76" y2="855" marker-end="url(#arrow)" />
+    <text class="note" x="84" y="859" font-size="10">ObjectId reference (ref)</text>
+    <line class="edge-d" x1="44" y1="873" x2="76" y2="873" />
+    <text class="note" x="84" y="877" font-size="10">read at runtime, no stored ref</text>
+  </g>
+</svg>
