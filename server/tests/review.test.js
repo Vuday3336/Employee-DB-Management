@@ -1,12 +1,21 @@
 'use strict';
 /** Performance review visibility, the draft/submit/acknowledge cycle and the org chart. */
-const { connect, close, clear } = require('./setup');
+const { connect, close, clear, requireDatabase, getDb } = require('./setup');
 const { makeUser, as } = require('./factories');
 const { dayjs } = require('../utils/dates');
 
-beforeAll(connect);
-afterAll(close);
-beforeEach(clear);
+const hasDb = requireDatabase();
+const describeDb = hasDb ? describe : describe.skip;
+
+beforeAll(async () => {
+  if (hasDb) await connect();
+});
+afterAll(async () => {
+  if (hasDb) await close();
+});
+beforeEach(async () => {
+  if (hasDb) await clear();
+});
 
 const period = { year: dayjs.utc().year(), quarter: dayjs.utc().quarter() };
 const scores = [
@@ -15,7 +24,7 @@ const scores = [
   { competency: 'collaboration', score: 4 },
 ];
 
-describe('creating reviews', () => {
+describeDb('creating reviews', () => {
   it('lets a manager review a direct report and averages the scores', async () => {
     const manager = await makeUser({ role: 'manager' });
     const report = await makeUser({ role: 'employee', manager: manager.employee._id });
@@ -72,7 +81,7 @@ describe('creating reviews', () => {
   });
 });
 
-describe('draft visibility', () => {
+describeDb('draft visibility', () => {
   it('hides a draft from the employee until it is submitted', async () => {
     const manager = await makeUser({ role: 'manager' });
     const report = await makeUser({ role: 'employee', manager: manager.employee._id });
@@ -98,7 +107,7 @@ describe('draft visibility', () => {
   });
 });
 
-describe('the acknowledge step', () => {
+describeDb('the acknowledge step', () => {
   it('lets only the subject acknowledge, and locks the review afterwards', async () => {
     const manager = await makeUser({ role: 'manager' });
     const report = await makeUser({ role: 'employee', manager: manager.employee._id });
@@ -141,7 +150,7 @@ describe('the acknowledge step', () => {
   });
 });
 
-describe('editing and deleting', () => {
+describeDb('editing and deleting', () => {
   it("stops one manager editing another manager's review", async () => {
     const admin = await makeUser({ role: 'admin' });
     const managerA = await makeUser({ role: 'manager' });
@@ -179,7 +188,7 @@ describe('editing and deleting', () => {
   });
 });
 
-describe('org chart', () => {
+describeDb('org chart', () => {
   it('builds a nested tree from the manager edge', async () => {
     const admin = await makeUser({ role: 'admin' }); // root, no manager
     const vp = await makeUser({ role: 'manager', manager: admin.employee._id });

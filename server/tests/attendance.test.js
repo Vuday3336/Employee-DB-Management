@@ -1,21 +1,29 @@
 'use strict';
 /** Attendance check-in/out rules, manual overrides and the monthly aggregation. */
-const { connect, close, clear } = require('./setup');
+const { connect, close, clear, requireDatabase, getDb } = require('./setup');
 const { makeUser, as } = require('./factories');
-const { Attendance } = require('../models');
-const { dayjs, startOfDay } = require('../utils/dates');
+const { dayjs } = require('../utils/dates');
 const { markMissingAsAbsent } = require('../jobs');
 
-beforeAll(connect);
-afterAll(close);
-beforeEach(clear);
+const hasDb = requireDatabase();
+const describeDb = hasDb ? describe : describe.skip;
+
+beforeAll(async () => {
+  if (hasDb) await connect();
+});
+afterAll(async () => {
+  if (hasDb) await close();
+});
+beforeEach(async () => {
+  if (hasDb) await clear();
+});
 
 const todayAt = (hhmm) => {
   const [h, m] = hhmm.split(':').map(Number);
   return dayjs.utc().startOf('day').hour(h).minute(m).toISOString();
 };
 
-describe('check-in and check-out', () => {
+describeDb('check-in and check-out', () => {
   it('marks an early arrival present and a late one late', async () => {
     const early = await makeUser({ role: 'employee' });
     const late = await makeUser({ role: 'employee' });
@@ -58,7 +66,7 @@ describe('check-in and check-out', () => {
   });
 });
 
-describe('manual corrections', () => {
+describeDb('manual corrections', () => {
   it('lets a manager correct a report record but not their own', async () => {
     const manager = await makeUser({ role: 'manager' });
     const report = await makeUser({ role: 'employee', manager: manager.employee._id });
@@ -117,12 +125,13 @@ describe('manual corrections', () => {
       .send({ employee: String(employee.employee._id), date, status: 'present' })
       .expect(200);
 
-    const count = await Attendance.countDocuments({ employee: employee.employee._id });
+    const [{ count }] = await getDb()`
+      select count(*)::int from attendance where employee_id = ${employee.employee._id}`;
     expect(count).toBe(1);
   });
 });
 
-describe('calendar and summary', () => {
+describeDb('calendar and summary', () => {
   it('returns a full month of cells with weekends filled in', async () => {
     const { token } = await makeUser({ role: 'employee' });
     const month = dayjs.utc().format('YYYY-MM');
@@ -139,19 +148,13 @@ describe('calendar and summary', () => {
 
     // Four present days and one absent inside the current month.
     const base = dayjs.utc().startOf('month');
-    const rows = [0, 1, 2, 3].map((i) => ({
-      employee: employee.employee._id,
-      date: startOfDay(base.add(i, 'day').toDate()),
-      status: 'present',
-      workedMinutes: 480,
-    }));
-    rows.push({
-      employee: employee.employee._id,
-      date: startOfDay(base.add(4, 'day').toDate()),
-      status: 'absent',
-      workedMinutes: 0,
-    });
-    await Attendance.insertMany(rows);
+    const dates = [0, 1, 2, 3, 4].map((i) => base.add(i, 'day').format('YYYY-MM-DD'));
+    await getDb()`
+      insert into attendance (employee_id, date, status, worked_minutes)
+      select ${employee.employee._id}, d::date,
+             case when d::date = ${dates[4]}::date then 'absent' else 'present' end::attendance_status,
+             case when d::date = ${dates[4]}::date then 0 else 480 end
+      from unnest(${dates}::date[]) as d`;
 
     const res = await as(admin.token).get(
       `/api/attendance/summary?employee=${employee.employee._id}&month=${base.format('YYYY-MM')}`
@@ -170,7 +173,7 @@ describe('calendar and summary', () => {
   });
 });
 
-describe('the auto-absent job', () => {
+describeDb('the auto-absent job', () => {
   it('marks employees with no record absent, and leaves existing rows alone', async () => {
     const present = await makeUser({ role: 'employee' });
     await makeUser({ role: 'employee' });
@@ -180,20 +183,16 @@ describe('the auto-absent job', () => {
     let target = dayjs.utc().subtract(1, 'day');
     while ([0, 6].includes(target.day())) target = target.subtract(1, 'day');
 
-    await Attendance.create({
-      employee: present.employee._id,
-      date: startOfDay(target.toDate()),
-      status: 'present',
-      workedMinutes: 480,
-    });
+    await getDb()`
+      insert into attendance (employee_id, date, status, worked_minutes)
+      values (${present.employee._id}, ${target.format('YYYY-MM-DD')}, 'present', 480)`;
 
     const result = await markMissingAsAbsent(target.toDate());
     expect(result.absent).toBe(2);
 
-    const stillPresent = await Attendance.findOne({
-      employee: present.employee._id,
-      date: startOfDay(target.toDate()),
-    }).lean();
+    const [stillPresent] = await getDb()`
+      select status from attendance
+      where employee_id = ${present.employee._id} and date = ${target.format('YYYY-MM-DD')}`;
     expect(stillPresent.status).toBe('present');
   });
 

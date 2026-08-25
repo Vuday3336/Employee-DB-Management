@@ -4,14 +4,23 @@
  * that access is decided by the reporting tree on the server, not by what the UI
  * chooses to render.
  */
-const { connect, close, clear } = require('./setup');
+const { connect, close, clear, requireDatabase, getDb } = require('./setup');
 const { makeUser, makeDepartment, makePolicies, as, request, app } = require('./factories');
 
-beforeAll(connect);
-afterAll(close);
-beforeEach(clear);
+const hasDb = requireDatabase();
+const describeDb = hasDb ? describe : describe.skip;
 
-describe('authentication', () => {
+beforeAll(async () => {
+  if (hasDb) await connect();
+});
+afterAll(async () => {
+  if (hasDb) await close();
+});
+beforeEach(async () => {
+  if (hasDb) await clear();
+});
+
+describeDb('authentication', () => {
   it('rejects a request with no token', async () => {
     const res = await request(app).get('/api/employees');
     expect(res.status).toBe(401);
@@ -46,7 +55,7 @@ describe('authentication', () => {
   });
 });
 
-describe('role gate (layer 2)', () => {
+describeDb('role gate (layer 2)', () => {
   it('stops an employee from creating employee records', async () => {
     const { token } = await makeUser({ role: 'employee' });
     const res = await as(token).post('/api/employees').send({
@@ -95,7 +104,7 @@ describe('role gate (layer 2)', () => {
   });
 });
 
-describe('record-level scope (layer 3)', () => {
+describeDb('record-level scope (layer 3)', () => {
   it('limits an employee list to the caller reporting tree', async () => {
     const manager = await makeUser({ role: 'manager' });
     await makeUser({ role: 'employee', manager: manager.employee._id });
@@ -136,7 +145,7 @@ describe('record-level scope (layer 3)', () => {
   });
 });
 
-describe('field-level redaction', () => {
+describeDb('field-level redaction', () => {
   it('hides salary from a manager but shows it to the employee and to admins', async () => {
     const admin = await makeUser({ role: 'admin' });
     const manager = await makeUser({ role: 'manager' });
@@ -170,7 +179,7 @@ describe('field-level redaction', () => {
   });
 });
 
-describe('soft delete', () => {
+describeDb('soft delete', () => {
   it('deactivates instead of deleting and re-points direct reports', async () => {
     const admin = await makeUser({ role: 'admin' });
     const vp = await makeUser({ role: 'manager' });
@@ -197,7 +206,7 @@ describe('soft delete', () => {
   });
 });
 
-describe('reporting loops', () => {
+describeDb('reporting loops', () => {
   it('rejects a manager reassignment that would create a cycle', async () => {
     const admin = await makeUser({ role: 'admin' });
     const boss = await makeUser({ role: 'manager' });
@@ -213,7 +222,7 @@ describe('reporting loops', () => {
   });
 });
 
-describe('search, filter and pagination', () => {
+describeDb('search, filter and pagination', () => {
   it('paginates and searches the employee list', async () => {
     const admin = await makeUser({ role: 'admin' });
     await makeUser({ role: 'employee', firstName: 'Zara', lastName: 'Quinn' });
@@ -237,7 +246,7 @@ describe('search, filter and pagination', () => {
   });
 });
 
-describe('input hardening', () => {
+describeDb('input hardening', () => {
   it('strips Mongo operators from the request body', async () => {
     await makeUser({ role: 'employee', workEmail: 'victim@empcore.test' });
     const res = await request(app)
@@ -253,7 +262,7 @@ describe('input hardening', () => {
   });
 });
 
-describe('dashboard scoping', () => {
+describeDb('dashboard scoping', () => {
   it('counts only the manager team, and the whole org for an admin', async () => {
     await makePolicies();
     const admin = await makeUser({ role: 'admin' });

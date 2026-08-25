@@ -1,13 +1,20 @@
 'use strict';
 /** Covers the leave state machine, its business rules and the approval boundary. */
-const { connect, close, clear } = require('./setup');
+const { connect, close, clear, requireDatabase, getDb } = require('./setup');
 const { makeUser, makePolicies, as } = require('./factories');
-const { Employee, LeaveRequest, Attendance } = require('../models');
 const { dayjs } = require('../utils/dates');
 
-beforeAll(connect);
-afterAll(close);
+const hasDb = requireDatabase();
+const describeDb = hasDb ? describe : describe.skip;
+
+beforeAll(async () => {
+  if (hasDb) await connect();
+});
+afterAll(async () => {
+  if (hasDb) await close();
+});
 beforeEach(async () => {
+  if (!hasDb) return;
   await clear();
   await makePolicies();
 });
@@ -21,7 +28,7 @@ const range = (weeksAhead = 1, lengthDays = 2) => ({
   endDate: dayjs.utc(nextMonday(weeksAhead)).add(lengthDays - 1, 'day').format('YYYY-MM-DD'),
 });
 
-describe('creating a request', () => {
+describeDb('creating a request', () => {
   it('counts business days and ignores the weekend', async () => {
     const employee = await makeUser({ role: 'employee' });
     const monday = nextMonday();
@@ -57,10 +64,9 @@ describe('creating a request', () => {
 
   it('refuses a request larger than the remaining balance', async () => {
     const employee = await makeUser({ role: 'employee' });
-    await Employee.updateOne(
-      { _id: employee.employee._id, 'leaveBalances.type': 'annual' },
-      { $set: { 'leaveBalances.$.entitled': 1, 'leaveBalances.$.used': 0 } }
-    );
+    await getDb()`
+      update leave_balances set entitled = 1, used = 0
+      where employee_id = ${employee.employee._id} and type = 'annual'`;
 
     const res = await as(employee.token)
       .post('/api/leave')
@@ -96,7 +102,7 @@ describe('creating a request', () => {
   });
 });
 
-describe('the approval boundary', () => {
+describeDb('the approval boundary', () => {
   it('lets the reporting manager approve and consumes the balance', async () => {
     const manager = await makeUser({ role: 'manager' });
     const report = await makeUser({ role: 'employee', manager: manager.employee._id });
@@ -119,7 +125,9 @@ describe('the approval boundary', () => {
     expect(annual.remaining).toBe(22);
 
     // Approved days are reflected in attendance so the report does not read them as absences.
-    const marked = await Attendance.countDocuments({ employee: report.employee._id, status: 'on_leave' });
+    const [{ count: marked }] = await getDb()`
+      select count(*)::int from attendance
+      where employee_id = ${report.employee._id} and status = 'on_leave'`;
     expect(marked).toBe(2);
   });
 
@@ -191,7 +199,7 @@ describe('the approval boundary', () => {
   });
 });
 
-describe('the state machine', () => {
+describeDb('the state machine', () => {
   it('refuses to decide an already-decided request', async () => {
     const manager = await makeUser({ role: 'manager' });
     const report = await makeUser({ role: 'employee', manager: manager.employee._id });
@@ -253,7 +261,9 @@ describe('the state machine', () => {
     const balance = await as(report.token).get('/api/leave/balance');
     expect(balance.body.data.find((b) => b.type === 'annual').used).toBe(0);
 
-    const marked = await Attendance.countDocuments({ employee: report.employee._id, status: 'on_leave' });
+    const [{ count: marked }] = await getDb()`
+      select count(*)::int from attendance
+      where employee_id = ${report.employee._id} and status = 'on_leave'`;
     expect(marked).toBe(0);
   });
 
@@ -287,7 +297,8 @@ describe('the state machine', () => {
     const res = await as(report.token).patch(`/api/leave/${created.body.data._id}/cancel`).send({});
     expect(res.status).toBe(409);
 
-    const stored = await LeaveRequest.findById(created.body.data._id).lean();
+    const [stored] = await getDb()`
+      select status from leave_requests where id = ${created.body.data._id}`;
     expect(stored.status).toBe('rejected');
   });
 });
