@@ -14,6 +14,10 @@ making exactly that request. That design is written up in
 Node 18+   ·   MongoDB 6+   ·   React 18   ·   Express 4   ·   Tailwind 4
 ```
 
+**Live:** [empcore.vercel.app](https://empcore.vercel.app) — the client is deployed;
+point `VITE_API_URL` at a running API to sign in. See
+[docs/deployment.md](./docs/deployment.md).
+
 ---
 
 ## Quick start
