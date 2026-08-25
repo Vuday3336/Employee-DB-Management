@@ -1,12 +1,17 @@
 'use strict';
 const { z } = require('zod');
-const { EMPLOYEE_STATUS, EMPLOYMENT_TYPES } = require('../models/Employee');
-const { LEAVE_TYPES } = require('../models/LeaveRequest');
-const { ATTENDANCE_STATUS } = require('../models/Attendance');
-const { COMPETENCIES } = require('../models/PerformanceReview');
-const { ROLES } = require('../models/User');
+const {
+  ROLES,
+  EMPLOYEE_STATUS,
+  EMPLOYMENT_TYPES,
+  ATTENDANCE_STATUS,
+  LEAVE_TYPES,
+  COMPETENCIES,
+} = require('../db/enums');
 
-const objectId = z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid id');
+// Postgres identifiers are UUIDs; the shape check keeps a malformed id out of the
+// query layer entirely rather than surfacing as a cast error.
+const objectId = z.string().uuid('Invalid id');
 const isoDate = z.coerce.date({ invalid_type_error: 'Invalid date' });
 
 const password = z

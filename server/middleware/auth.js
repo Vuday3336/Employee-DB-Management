@@ -1,5 +1,5 @@
 'use strict';
-const { User } = require('../models');
+const { db } = require('../db');
 const ApiError = require('../utils/ApiError');
 const asyncHandler = require('../utils/asyncHandler');
 const { verifyAccessToken } = require('../services/tokenService');
@@ -17,16 +17,17 @@ const authenticate = asyncHandler(async (req, _res, next) => {
   if (!token) throw ApiError.unauthorized('Missing bearer token');
 
   const payload = verifyAccessToken(token);
-  const user = await User.findById(payload.sub).lean();
+  const [user] = await db`
+    select id, email, role, employee_id, is_active from users where id = ${payload.sub}::uuid`;
   if (!user) throw ApiError.unauthorized('Account no longer exists');
-  if (!user.isActive) throw ApiError.forbidden('Account is deactivated');
+  if (!user.is_active) throw ApiError.forbidden('Account is deactivated');
 
   req.user = {
-    id: String(user._id),
-    _id: user._id,
+    id: String(user.id),
+    _id: user.id,
     email: user.email,
     role: user.role,
-    employee: user.employee ? String(user.employee) : null,
+    employee: user.employee_id ? String(user.employee_id) : null,
   };
   next();
 });

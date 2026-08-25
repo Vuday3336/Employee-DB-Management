@@ -1,5 +1,6 @@
 'use strict';
-const { User, Employee } = require('../models');
+const bcrypt = require('bcryptjs');
+const { db } = require('../db');
 const ApiError = require('../utils/ApiError');
 const asyncHandler = require('../utils/asyncHandler');
 const audit = require('../services/auditService');
@@ -8,30 +9,36 @@ const tokens = require('../services/tokenService');
 const MAX_ATTEMPTS = 5;
 const LOCK_MINUTES = 15;
 
+const hash = (plain) => bcrypt.hash(plain, 12);
+
+/** The session payload the client expects — unchanged from the Mongo implementation. */
 const publicUser = (user, employee) => ({
-  id: user._id,
+  id: user.id,
   email: user.email,
   role: user.role,
-  employeeId: user.employee || null,
-  isActive: user.isActive,
-  lastLoginAt: user.lastLoginAt,
+  employeeId: user.employee_id || null,
+  isActive: user.is_active,
+  lastLoginAt: user.last_login_at,
   employee: employee
     ? {
-        id: employee._id,
-        firstName: employee.firstName,
-        lastName: employee.lastName,
-        fullName: `${employee.firstName} ${employee.lastName}`,
-        jobTitle: employee.jobTitle,
-        department: employee.department,
-        avatarUrl: employee.avatarUrl,
+        id: employee.id,
+        firstName: employee.first_name,
+        lastName: employee.last_name,
+        fullName: `${employee.first_name} ${employee.last_name}`,
+        jobTitle: employee.job_title,
+        department: employee.department_id,
+        avatarUrl: employee.avatar_url,
       }
     : null,
 });
 
+const findEmployee = async (id) =>
+  id ? (await db`select * from employees where id = ${id}`)[0] || null : null;
+
 async function issueSession(res, user) {
-  const accessToken = tokens.signAccessToken(user);
-  const refreshToken = tokens.signRefreshToken(user);
-  tokens.setRefreshCookie(res, refreshToken);
+  const principal = { _id: user.id, role: user.role, employee: user.employee_id, email: user.email };
+  const accessToken = tokens.signAccessToken(principal);
+  tokens.setRefreshCookie(res, tokens.signRefreshToken({ ...principal, tokenVersion: user.token_version }));
   return accessToken;
 }
 
@@ -44,22 +51,19 @@ async function issueSession(res, user) {
 const register = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
 
-  const exists = await User.findOne({ email });
+  const [exists] = await db`select id from users where email = ${email}`;
   if (exists) throw ApiError.conflict('An account with that email already exists');
 
   // Link to a pre-created HR record when the work email matches.
-  const employee = await Employee.findOne({ workEmail: email, deletedAt: null }).lean();
+  const [employee] = await db`
+    select * from employees where work_email = ${email} and deleted_at is null`;
 
-  const user = new User({ email, role: 'employee', employee: employee?._id });
-  await user.setPassword(password);
-  await user.save();
+  const [user] = await db`
+    insert into users (email, password_hash, role, employee_id)
+    values (${email}, ${await hash(password)}, 'employee', ${employee?.id || null})
+    returning *`;
 
-  await audit.record(req, {
-    action: 'auth.register',
-    entity: 'User',
-    entityId: user._id,
-    actor: user,
-  });
+  await audit.record(req, { action: 'auth.register', entity: 'User', entityId: user.id, actor: user });
 
   const accessToken = await issueSession(res, user);
   res.status(201).json({ success: true, data: { accessToken, user: publicUser(user, employee) } });
@@ -73,73 +77,75 @@ const register = asyncHandler(async (req, res) => {
 const login = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
 
-  const user = await User.findOne({ email }).select('+passwordHash');
+  const [user] = await db`select * from users where email = ${email}`;
   if (!user) throw ApiError.unauthorized('Invalid email or password');
 
-  if (user.isLocked) {
+  if (user.locked_until && new Date(user.locked_until) > new Date()) {
     throw ApiError.forbidden('Account temporarily locked after too many failed attempts');
   }
 
-  const ok = await user.verifyPassword(password);
+  const ok = await bcrypt.compare(password, user.password_hash);
   if (!ok) {
-    user.failedLoginAttempts += 1;
-    if (user.failedLoginAttempts >= MAX_ATTEMPTS) {
-      user.lockedUntil = new Date(Date.now() + LOCK_MINUTES * 60 * 1000);
-      user.failedLoginAttempts = 0;
-    }
-    await user.save();
+    const attempts = user.failed_login_attempts + 1;
+    const lock = attempts >= MAX_ATTEMPTS;
+    await db`
+      update users set
+        failed_login_attempts = ${lock ? 0 : attempts},
+        locked_until = ${lock ? new Date(Date.now() + LOCK_MINUTES * 60 * 1000) : null}
+      where id = ${user.id}`;
+
     await audit.record(req, {
       action: 'auth.login',
       entity: 'User',
-      entityId: user._id,
+      entityId: user.id,
       outcome: 'denied',
       actor: user,
     });
     throw ApiError.unauthorized('Invalid email or password');
   }
 
-  if (!user.isActive) throw ApiError.forbidden('Account is deactivated');
+  if (!user.is_active) throw ApiError.forbidden('Account is deactivated');
 
-  user.failedLoginAttempts = 0;
-  user.lockedUntil = undefined;
-  user.lastLoginAt = new Date();
-  await user.save();
+  const [fresh] = await db`
+    update users set failed_login_attempts = 0, locked_until = null, last_login_at = now()
+    where id = ${user.id} returning *`;
 
-  const employee = user.employee ? await Employee.findById(user.employee).lean() : null;
-  const accessToken = await issueSession(res, user);
+  const employee = await findEmployee(fresh.employee_id);
+  const accessToken = await issueSession(res, fresh);
 
-  await audit.record(req, { action: 'auth.login', entity: 'User', entityId: user._id, actor: user });
-  res.json({ success: true, data: { accessToken, user: publicUser(user, employee) } });
+  await audit.record(req, { action: 'auth.login', entity: 'User', entityId: fresh.id, actor: fresh });
+  res.json({ success: true, data: { accessToken, user: publicUser(fresh, employee) } });
 });
 
 /**
  * POST /api/auth/refresh
- * Rotates the refresh cookie and re-checks tokenVersion, so a token issued before
- * a logout or password change is rejected even though its signature is still valid.
+ * Rotates the refresh cookie and re-checks token_version, so a token issued before
+ * a logout, password change or role change is rejected even though its signature
+ * is still valid.
  */
 const refresh = asyncHandler(async (req, res) => {
   const token = req.cookies?.[tokens.REFRESH_COOKIE];
   if (!token) throw ApiError.unauthorized('No active session');
 
   const payload = tokens.verifyRefreshToken(token);
-  const user = await User.findById(payload.sub);
-  if (!user || !user.isActive) throw ApiError.unauthorized('Session is no longer valid');
-  if (payload.tv !== user.tokenVersion) {
+  const [user] = await db`select * from users where id = ${payload.sub}::uuid`;
+  if (!user || !user.is_active) throw ApiError.unauthorized('Session is no longer valid');
+  if (payload.tv !== user.token_version) {
     throw ApiError.unauthorized('Session was revoked, please sign in again');
   }
 
   const accessToken = await issueSession(res, user);
-  const employee = user.employee ? await Employee.findById(user.employee).lean() : null;
+  const employee = await findEmployee(user.employee_id);
   res.json({ success: true, data: { accessToken, user: publicUser(user, employee) } });
 });
 
-/** POST /api/auth/logout — bumps tokenVersion so every outstanding refresh token dies. */
+/** POST /api/auth/logout — bumps token_version so every outstanding refresh token dies. */
 const logout = asyncHandler(async (req, res) => {
   const token = req.cookies?.[tokens.REFRESH_COOKIE];
   if (token) {
     try {
       const payload = tokens.verifyRefreshToken(token);
-      await User.findByIdAndUpdate(payload.sub, { $inc: { tokenVersion: 1 } });
+      await db`update users set token_version = token_version + 1 where id = ${payload.sub}::uuid`;
     } catch {
       /* already invalid — clearing the cookie is enough */
     }
@@ -150,34 +156,34 @@ const logout = asyncHandler(async (req, res) => {
 
 /** GET /api/auth/me */
 const me = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user.id).lean();
+  const [user] = await db`select * from users where id = ${req.user.id}::uuid`;
   if (!user) throw ApiError.unauthorized();
-  const employee = user.employee
-    ? await Employee.findById(user.employee).populate('department', 'name code').lean()
-    : null;
+  const employee = await findEmployee(user.employee_id);
   res.json({ success: true, data: publicUser(user, employee) });
 });
 
 /** PATCH /api/auth/password */
 const changePassword = asyncHandler(async (req, res) => {
   const { currentPassword, newPassword } = req.body;
-  const user = await User.findById(req.user.id).select('+passwordHash');
+  const [user] = await db`select * from users where id = ${req.user.id}::uuid`;
   if (!user) throw ApiError.unauthorized();
 
-  const ok = await user.verifyPassword(currentPassword);
+  const ok = await bcrypt.compare(currentPassword, user.password_hash);
   if (!ok) throw ApiError.badRequest('Current password is incorrect');
 
-  await user.setPassword(newPassword); // also bumps tokenVersion
-  await user.save();
+  // Bumping token_version here is what actually revokes the other sessions.
+  await db`
+    update users set password_hash = ${await hash(newPassword)}, token_version = token_version + 1
+    where id = ${user.id}`;
   tokens.clearRefreshCookie(res);
 
   await audit.record(req, {
     action: 'auth.password_change',
     entity: 'User',
-    entityId: user._id,
+    entityId: user.id,
     actor: user,
   });
   res.json({ success: true, message: 'Password updated. Please sign in again.' });
 });
 
-module.exports = { register, login, refresh, logout, me, changePassword };
+module.exports = { register, login, refresh, logout, me, changePassword, hash, publicUser };

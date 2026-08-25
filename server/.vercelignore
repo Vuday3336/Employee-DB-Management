@@ -1,0 +1,5 @@
+tests
+.mongo-data
+uploads
+*.log
+.env

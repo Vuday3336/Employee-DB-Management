@@ -15,6 +15,7 @@ const requestContext = require('./middleware/requestContext');
 const { apiLimiter } = require('./middleware/rateLimiter');
 const { notFound, errorHandler } = require('./middleware/errorHandler');
 const openapi = require('./docs/openapi');
+const { healthCheck } = require('./db');
 
 const app = express();
 
@@ -37,15 +38,24 @@ if (!env.isTest) app.use(morgan('dev'));
 
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'), { maxAge: '7d' }));
 
-app.get('/api/health', (_req, res) =>
-  res.json({
-    success: true,
+app.get('/api/health', async (_req, res) => {
+  // A liveness probe that does not touch the database is close to useless: the
+  // process can be up while every request 500s.
+  let database = 'up';
+  try {
+    await healthCheck();
+  } catch {
+    database = 'down';
+  }
+  res.status(database === 'up' ? 200 : 503).json({
+    success: database === 'up',
     service: 'empcore-api',
+    database,
     env: env.NODE_ENV,
     uptime: Math.round(process.uptime()),
     timestamp: new Date().toISOString(),
-  })
-);
+  });
+});
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openapi, { customSiteTitle: 'EmpCore API' }));
 app.get('/api/openapi.json', (_req, res) => res.json(openapi));

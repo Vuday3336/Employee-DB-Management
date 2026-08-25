@@ -1,20 +1,23 @@
 'use strict';
-const { Employee, LeaveRequest, PerformanceReview, Attendance } = require('../models');
+const { db } = require('../db');
+const { LEAVE_COLS, REVIEW_COLS, ATTENDANCE_COLS, employeeMini } = require('../db/shapes');
 const asyncHandler = require('../utils/asyncHandler');
 const scopeService = require('../services/scopeService');
 const reportService = require('../services/reportService');
 const leaveService = require('../services/leaveService');
-const { startOfDay, dayjs } = require('../utils/dates');
+const { dayjs } = require('../utils/dates');
+
+const today = () => dayjs.utc().format('YYYY-MM-DD');
 
 /**
  * GET /api/dashboard
- * One scoped snapshot, assembled from parallel aggregation pipelines. Every metric
- * is restricted to the caller's visible employee set, so a manager's "headcount"
- * is their team's headcount, not the company's.
+ * One scoped snapshot, assembled from parallel queries. Every metric is restricted
+ * to the caller's visible employee set inside the WHERE clause, so a manager's
+ * "headcount" is their team's headcount, not the company's.
  */
 const overview = asyncHandler(async (req, res) => {
   const scope = await scopeService.visibleEmployeeIds(req.user);
-  const employeeMatch = { deletedAt: null, ...(scope === null ? {} : { _id: { $in: scope } }) };
+  const inScope = (col) => (scope === null ? db`` : db`and ${db.unsafe(col)} = any(${scope}::uuid[])`);
 
   const [
     headcountByDepartment,
@@ -23,10 +26,7 @@ const overview = asyncHandler(async (req, res) => {
     attendanceTrend,
     hiringTrend,
     performance,
-    totalHeadcount,
-    newThisMonth,
-    onLeaveToday,
-    pendingReviews,
+    [counts],
     stale,
   ] = await Promise.all([
     reportService.headcountByDepartment(scope),
@@ -35,20 +35,17 @@ const overview = asyncHandler(async (req, res) => {
     reportService.attendanceTrend(scope, 6),
     reportService.hiringTrend(scope, 12),
     reportService.performanceByDepartment(scope),
-    Employee.countDocuments({ ...employeeMatch, status: { $ne: 'terminated' } }),
-    Employee.countDocuments({
-      ...employeeMatch,
-      hireDate: { $gte: dayjs.utc().startOf('month').toDate() },
-    }),
-    Attendance.countDocuments({
-      date: startOfDay(new Date()),
-      status: 'on_leave',
-      ...(scope === null ? {} : { employee: { $in: scope } }),
-    }),
-    PerformanceReview.countDocuments({
-      status: 'draft',
-      ...(scope === null ? {} : { employee: { $in: scope } }),
-    }),
+    db`
+      select
+        (select count(*)::int from employees e
+         where e.deleted_at is null and e.status <> 'terminated' ${inScope('e.id')})   as "headcount",
+        (select count(*)::int from employees e
+         where e.deleted_at is null and e.hire_date >= date_trunc('month', now())
+         ${inScope('e.id')})                                                          as "newThisMonth",
+        (select count(*)::int from attendance a
+         where a.date = ${today()} and a.status = 'on_leave' ${inScope('a.employee_id')}) as "onLeaveToday",
+        (select count(*)::int from performance_reviews r
+         where r.status = 'draft' ${inScope('r.employee_id')})                        as "draftReviews"`,
     reportService.stalePendingApprovals(scope),
   ]);
 
@@ -57,12 +54,12 @@ const overview = asyncHandler(async (req, res) => {
     data: {
       scope: req.user.role === 'admin' ? 'organisation' : 'your team',
       kpis: {
-        headcount: totalHeadcount,
-        newThisMonth,
+        headcount: counts.headcount,
+        newThisMonth: counts.newThisMonth,
         pendingLeave: leave.pending,
         attendanceRate: attendance.rate,
-        onLeaveToday,
-        draftReviews: pendingReviews,
+        onLeaveToday: counts.onLeaveToday,
+        draftReviews: counts.draftReviews,
       },
       attendance,
       headcountByDepartment,
@@ -82,40 +79,36 @@ const overview = asyncHandler(async (req, res) => {
  */
 const myOverview = asyncHandler(async (req, res) => {
   const employeeId = req.user.employee;
-  if (!employeeId) {
-    return res.json({ success: true, data: { linked: false } });
-  }
+  if (!employeeId) return res.json({ success: true, data: { linked: false } });
 
-  const [attendanceToday, balances, upcoming, latestReview, monthSummary, pendingCount] =
+  const [[attendanceToday], balances, upcomingLeave, [latestReview], monthSummary, [{ pending }]] =
     await Promise.all([
-      Attendance.findOne({ employee: employeeId, date: startOfDay(new Date()) }).lean(),
+      db`select ${db.unsafe(ATTENDANCE_COLS)} from attendance a
+         where a.employee_id = ${employeeId} and a.date = ${today()}`,
       leaveService.balanceSummary(employeeId),
-      LeaveRequest.find({
-        employee: employeeId,
-        status: { $in: ['pending', 'approved'] },
-        endDate: { $gte: startOfDay(new Date()) },
-      })
-        .sort({ startDate: 1 })
-        .limit(5)
-        .lean(),
-      PerformanceReview.findOne({ employee: employeeId, status: { $in: ['submitted', 'acknowledged'] } })
-        .sort({ 'period.year': -1, 'period.quarter': -1 })
-        .populate('reviewer', 'firstName lastName jobTitle')
-        .lean(),
+      db`select ${db.unsafe(LEAVE_COLS)} from leave_requests l
+         where l.employee_id = ${employeeId} and l.status in ('pending','approved')
+           and l.end_date >= ${today()}
+         order by l.start_date limit 5`,
+      db`select ${db.unsafe(REVIEW_COLS)}, ${db.unsafe(employeeMini('rv'))} as "reviewer"
+         from performance_reviews r join employees rv on rv.id = r.reviewer_id
+         where r.employee_id = ${employeeId} and r.status in ('submitted','acknowledged')
+         order by r.period_year desc, r.period_quarter desc limit 1`,
       reportService.monthlyAttendanceSummary(employeeId),
-      LeaveRequest.countDocuments({ employee: employeeId, status: 'pending' }),
+      db`select count(*)::int as pending from leave_requests
+         where employee_id = ${employeeId} and status = 'pending'`,
     ]);
 
   res.json({
     success: true,
     data: {
       linked: true,
-      attendanceToday,
+      attendanceToday: attendanceToday || null,
       balances,
-      upcomingLeave: upcoming,
-      latestReview,
+      upcomingLeave,
+      latestReview: latestReview || null,
       monthSummary,
-      pendingRequests: pendingCount,
+      pendingRequests: pending,
     },
   });
 });

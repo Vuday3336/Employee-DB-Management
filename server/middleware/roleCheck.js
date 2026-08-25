@@ -41,13 +41,11 @@ const SENSITIVE_FIELDS = ['salary'];
 
 function redactEmployee(doc, user) {
   if (!doc) return doc;
-  const plain = typeof doc.toObject === 'function' ? doc.toObject({ virtuals: true }) : { ...doc };
+  const plain = { ...doc };
   const isSelfRecord = user.employee && String(plain._id) === String(user.employee);
   if (user.role !== 'admin' && !isSelfRecord) {
     SENSITIVE_FIELDS.forEach((field) => delete plain[field]);
   }
-  // .lean() drops schema virtuals, so re-derive the one the UI depends on.
-  if (plain.firstName && !plain.fullName) plain.fullName = `${plain.firstName} ${plain.lastName}`.trim();
   return plain;
 }
 

@@ -3,12 +3,12 @@ const http = require('http');
 const app = require('./app');
 const env = require('./config/env');
 const logger = require('./utils/logger');
-const { connectDB } = require('./config/db');
+const { init, disconnect } = require('./db');
 const { initRealtime } = require('./services/realtime');
 const { startJobs, stopJobs } = require('./jobs');
 
 async function bootstrap() {
-  await connectDB();
+  await init();
 
   const server = http.createServer(app);
   initRealtime(server);
@@ -31,8 +31,7 @@ async function bootstrap() {
     logger.info(`${signal} received, shutting down`);
     stopJobs();
     server.close(async () => {
-      const { disconnectDB } = require('./config/db');
-      await disconnectDB();
+      await disconnect();
       process.exit(0);
     });
     // Don't hang forever on a stuck connection.

@@ -1,5 +1,6 @@
 'use strict';
-const { Attendance, Employee, Holiday } = require('../models');
+const { db } = require('../db');
+const { ATTENDANCE_COLS } = require('../db/shapes');
 const ApiError = require('../utils/ApiError');
 const asyncHandler = require('../utils/asyncHandler');
 const audit = require('../services/auditService');
@@ -7,8 +8,11 @@ const scopeService = require('../services/scopeService');
 const reportService = require('../services/reportService');
 const env = require('../config/env');
 const { parsePagination, buildMeta } = require('../utils/query');
-const { startOfDay, endOfDay, startOfMonth, endOfMonth, isWeekend, timeOnDay, dayjs } = require('../utils/dates');
+const { isWeekend, timeOnDay, dayjs } = require('../utils/dates');
 const { toCSV } = require('../utils/csv');
+
+const day = (d) => dayjs.utc(d).format('YYYY-MM-DD');
+const today = () => day(new Date());
 
 /** Resolve which employee a request is about, defaulting to the caller. */
 async function resolveTarget(req, explicitId) {
@@ -21,6 +25,10 @@ async function resolveTarget(req, explicitId) {
   return String(employeeId);
 }
 
+const fetchOne = async (employeeId, date) =>
+  (await db`select ${db.unsafe(ATTENDANCE_COLS)} from attendance a
+            where a.employee_id = ${employeeId} and a.date = ${date}`)[0] || null;
+
 /**
  * POST /api/attendance/check-in
  * Idempotent per day. Late is decided by comparing the check-in time against the
@@ -29,113 +37,112 @@ async function resolveTarget(req, explicitId) {
 const checkIn = asyncHandler(async (req, res) => {
   const employeeId = await resolveTarget(req);
   const at = req.body.at ? new Date(req.body.at) : new Date();
-  const day = startOfDay(at);
+  const date = day(at);
 
-  const existing = await Attendance.findOne({ employee: employeeId, date: day });
-  if (existing && existing.checkIn) {
+  const existing = await fetchOne(employeeId, date);
+  if (existing?.checkIn) {
     throw ApiError.conflict(`Already checked in at ${dayjs.utc(existing.checkIn).format('HH:mm')}`);
   }
 
-  const cutoff = timeOnDay(day, env.WORK_DAY_START);
-  const status = at > cutoff ? 'late' : 'present';
+  const status = at > timeOnDay(date, env.WORK_DAY_START) ? 'late' : 'present';
+  const source = String(employeeId) === String(req.user.employee) ? 'self' : req.user.role;
 
-  const record =
-    existing ||
-    new Attendance({
-      employee: employeeId,
-      date: day,
-      source: String(employeeId) === String(req.user.employee) ? 'self' : req.user.role,
-      recordedBy: req.user._id,
-    });
-  record.checkIn = at;
-  record.status = status;
-  record.notes = req.body.notes || record.notes;
-  await record.save();
+  const [row] = await db`
+    insert into attendance (employee_id, date, status, check_in, notes, source, recorded_by)
+    values (${employeeId}, ${date}, ${status}, ${at}, ${req.body.notes || null}, ${source}, ${req.user._id})
+    on conflict (employee_id, date) do update
+      set status = excluded.status, check_in = excluded.check_in,
+          notes = coalesce(excluded.notes, attendance.notes),
+          source = excluded.source, recorded_by = excluded.recorded_by
+    returning id`;
 
   await audit.record(req, {
     action: 'attendance.check_in',
     entity: 'Attendance',
-    entityId: record._id,
-    after: { date: day, status },
+    entityId: row.id,
+    after: { date, status },
   });
 
-  res.status(existing ? 200 : 201).json({ success: true, data: record });
+  res.status(existing ? 200 : 201).json({ success: true, data: await fetchOne(employeeId, date) });
 });
 
-/** POST /api/attendance/check-out — closes the open record and computes worked minutes. */
+/** POST /api/attendance/check-out — closes the record and computes worked minutes. */
 const checkOut = asyncHandler(async (req, res) => {
   const employeeId = await resolveTarget(req);
   const at = req.body.at ? new Date(req.body.at) : new Date();
-  const day = startOfDay(at);
+  const date = day(at);
 
-  const record = await Attendance.findOne({ employee: employeeId, date: day });
+  const record = await fetchOne(employeeId, date);
   if (!record || !record.checkIn) throw ApiError.badRequest('No check-in found for today');
   if (record.checkOut) {
     throw ApiError.conflict(`Already checked out at ${dayjs.utc(record.checkOut).format('HH:mm')}`);
   }
-  if (at <= record.checkIn) throw ApiError.badRequest('Check-out must be after check-in');
+  if (at <= new Date(record.checkIn)) throw ApiError.badRequest('Check-out must be after check-in');
 
-  record.checkOut = at;
+  const minutes = Math.round((at - new Date(record.checkIn)) / 60000);
   // Under four hours of presence counts as a half day.
-  if (Math.round((at - record.checkIn) / 60000) < 240 && record.status !== 'late') {
-    record.status = 'half_day';
-  }
-  await record.save();
+  const status = minutes < 240 && record.status !== 'late' ? 'half_day' : record.status;
+
+  await db`
+    update attendance set check_out = ${at}, worked_minutes = ${minutes}, status = ${status}
+    where employee_id = ${employeeId} and date = ${date}`;
 
   await audit.record(req, {
     action: 'attendance.check_out',
     entity: 'Attendance',
     entityId: record._id,
-    after: { workedMinutes: record.workedMinutes },
+    after: { workedMinutes: minutes },
   });
 
-  res.json({ success: true, data: record });
+  res.json({ success: true, data: await fetchOne(employeeId, date) });
 });
 
-/** GET /api/attendance/today — the caller's own record for today, if any. */
-const today = asyncHandler(async (req, res) => {
+/** GET /api/attendance/today — the caller's own record for today. */
+const todayRecord = asyncHandler(async (req, res) => {
   const employeeId = await resolveTarget(req);
-  const record = await Attendance.findOne({ employee: employeeId, date: startOfDay(new Date()) }).lean();
-  res.json({ success: true, data: record });
+  res.json({ success: true, data: await fetchOne(employeeId, today()) });
 });
 
-function rangeFromQuery(query) {
-  if (query.month) {
-    const base = dayjs.utc(`${query.month}-01`).toDate();
-    return { $gte: startOfMonth(base), $lte: endOfMonth(base) };
+function rangeClause(q) {
+  if (q.month) {
+    const base = dayjs.utc(`${q.month}-01`);
+    return db`and a.date between ${base.startOf('month').format('YYYY-MM-DD')}
+                             and ${base.endOf('month').format('YYYY-MM-DD')}`;
   }
-  const range = {};
-  if (query.from) range.$gte = startOfDay(query.from);
-  if (query.to) range.$lte = endOfDay(query.to);
-  return Object.keys(range).length ? range : null;
+  if (q.from && q.to) return db`and a.date between ${day(q.from)} and ${day(q.to)}`;
+  if (q.from) return db`and a.date >= ${day(q.from)}`;
+  if (q.to) return db`and a.date <= ${day(q.to)}`;
+  return db``;
 }
 
 /** GET /api/attendance — scoped, filterable attendance log. */
 const list = asyncHandler(async (req, res) => {
-  const query = req.validatedQuery || req.query;
-  const { page, limit, skip } = parsePagination(query);
+  const q = req.validatedQuery || req.query;
+  const { page, limit, skip } = parsePagination(q);
 
-  const filter = {};
-  if (query.employee) {
-    filter.employee = await resolveTarget(req, query.employee);
+  let scopeClause;
+  if (q.employee) {
+    const id = await resolveTarget(req, q.employee);
+    scopeClause = db`and a.employee_id = ${id}`;
   } else {
-    Object.assign(filter, await scopeService.scopeFilter(req.user, 'employee'));
+    const visible = await scopeService.visibleEmployeeIds(req.user);
+    scopeClause = visible === null ? db`` : db`and a.employee_id = any(${visible}::uuid[])`;
   }
-  const range = rangeFromQuery(query);
-  if (range) filter.date = range;
-  if (query.status) filter.status = query.status;
 
-  const [items, total] = await Promise.all([
-    Attendance.find(filter)
-      .populate('employee', 'firstName lastName employeeCode jobTitle')
-      .sort({ date: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    Attendance.countDocuments(filter),
+  const where = db`where true ${scopeClause} ${rangeClause(q)} ${
+    q.status ? db`and a.status = ${q.status}` : db``
+  }`;
+
+  const [items, [{ count }]] = await Promise.all([
+    db`select ${db.unsafe(ATTENDANCE_COLS)},
+              json_build_object('_id', e.id, 'firstName', e.first_name, 'lastName', e.last_name,
+                                'employeeCode', e.employee_code, 'jobTitle', e.job_title) as "employee"
+       from attendance a join employees e on e.id = a.employee_id
+       ${where} order by a.date desc limit ${limit} offset ${skip}`,
+    db`select count(*)::int from attendance a ${where}`,
   ]);
 
-  res.json({ success: true, data: items, meta: buildMeta({ page, limit, total }) });
+  res.json({ success: true, data: items, meta: buildMeta({ page, limit, total: count }) });
 });
 
 /**
@@ -145,22 +152,24 @@ const list = asyncHandler(async (req, res) => {
  */
 const calendar = asyncHandler(async (req, res) => {
   const employeeId = await resolveTarget(req, req.query.employee);
-  const base = req.query.month ? dayjs.utc(`${req.query.month}-01`).toDate() : new Date();
-  const from = startOfMonth(base);
-  const to = endOfMonth(base);
+  const base = req.query.month ? dayjs.utc(`${req.query.month}-01`) : dayjs.utc();
+  const from = base.startOf('month');
+  const to = base.endOf('month');
 
   const [records, holidays] = await Promise.all([
-    Attendance.find({ employee: employeeId, date: { $gte: from, $lte: to } }).lean(),
-    Holiday.find({ date: { $gte: from, $lte: to } }).lean(),
+    db`select ${db.unsafe(ATTENDANCE_COLS)} from attendance a
+       where a.employee_id = ${employeeId}
+         and a.date between ${from.format('YYYY-MM-DD')} and ${to.format('YYYY-MM-DD')}`,
+    db`select name, date from holidays
+       where date between ${from.format('YYYY-MM-DD')} and ${to.format('YYYY-MM-DD')}`,
   ]);
 
-  const byDate = new Map(records.map((r) => [dayjs.utc(r.date).format('YYYY-MM-DD'), r]));
-  const holidayByDate = new Map(holidays.map((h) => [dayjs.utc(h.date).format('YYYY-MM-DD'), h]));
+  const byDate = new Map(records.map((r) => [day(r.date), r]));
+  const holidayByDate = new Map(holidays.map((h) => [day(h.date), h]));
 
   const days = [];
-  const total = dayjs.utc(base).daysInMonth();
-  for (let i = 0; i < total; i += 1) {
-    const date = dayjs.utc(from).add(i, 'day');
+  for (let i = 0; i < base.daysInMonth(); i += 1) {
+    const date = from.add(i, 'day');
     const key = date.format('YYYY-MM-DD');
     const record = byDate.get(key);
     const holiday = holidayByDate.get(key);
@@ -176,16 +185,15 @@ const calendar = asyncHandler(async (req, res) => {
     });
   }
 
-  const summary = await reportService.monthlyAttendanceSummary(employeeId, base);
-  res.json({ success: true, data: { month: dayjs.utc(base).format('YYYY-MM'), days, summary } });
+  const summary = await reportService.monthlyAttendanceSummary(employeeId, base.toDate());
+  res.json({ success: true, data: { month: base.format('YYYY-MM'), days, summary } });
 });
 
 /** GET /api/attendance/summary — monthly aggregation for one employee. */
 const summary = asyncHandler(async (req, res) => {
   const employeeId = await resolveTarget(req, req.query.employee);
   const base = req.query.month ? dayjs.utc(`${req.query.month}-01`).toDate() : new Date();
-  const data = await reportService.monthlyAttendanceSummary(employeeId, base);
-  res.json({ success: true, data });
+  res.json({ success: true, data: await reportService.monthlyAttendanceSummary(employeeId, base) });
 });
 
 /**
@@ -198,57 +206,56 @@ const upsert = asyncHandler(async (req, res) => {
     throw ApiError.forbidden('You cannot hand-edit your own attendance');
   }
 
-  const day = startOfDay(req.body.date);
-  const before = await Attendance.findOne({ employee: employeeId, date: day }).lean();
+  const date = day(req.body.date);
+  const before = await fetchOne(employeeId, date);
+  const { checkIn, checkOut, status, notes } = req.body;
+  const minutes =
+    checkIn && checkOut ? Math.max(0, Math.round((new Date(checkOut) - new Date(checkIn)) / 60000)) : 0;
 
-  const record = await Attendance.findOneAndUpdate(
-    { employee: employeeId, date: day },
-    {
-      employee: employeeId,
-      date: day,
-      status: req.body.status,
-      checkIn: req.body.checkIn || null,
-      checkOut: req.body.checkOut || null,
-      notes: req.body.notes,
-      source: req.user.role,
-      recordedBy: req.user._id,
-      workedMinutes:
-        req.body.checkIn && req.body.checkOut
-          ? Math.max(0, Math.round((new Date(req.body.checkOut) - new Date(req.body.checkIn)) / 60000))
-          : 0,
-    },
-    { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
-  );
+  await db`
+    insert into attendance (employee_id, date, status, check_in, check_out, worked_minutes, notes, source, recorded_by)
+    values (${employeeId}, ${date}, ${status}, ${checkIn || null}, ${checkOut || null},
+            ${minutes}, ${notes || null}, ${req.user.role}, ${req.user._id})
+    on conflict (employee_id, date) do update
+      set status = excluded.status, check_in = excluded.check_in, check_out = excluded.check_out,
+          worked_minutes = excluded.worked_minutes, notes = excluded.notes,
+          source = excluded.source, recorded_by = excluded.recorded_by`;
+
+  const after = await fetchOne(employeeId, date);
 
   await audit.record(req, {
     action: 'attendance.override',
     entity: 'Attendance',
-    entityId: record._id,
+    entityId: after._id,
     before,
-    after: record.toObject(),
+    after,
   });
 
-  res.json({ success: true, data: record });
+  res.json({ success: true, data: after });
 });
 
 /** GET /api/attendance/export — CSV of the current filter. */
 const exportCsv = asyncHandler(async (req, res) => {
-  const filter = {};
-  if (req.query.employee) filter.employee = await resolveTarget(req, req.query.employee);
-  else Object.assign(filter, await scopeService.scopeFilter(req.user, 'employee'));
-  const range = rangeFromQuery(req.query);
-  if (range) filter.date = range;
+  let scopeClause;
+  if (req.query.employee) {
+    const id = await resolveTarget(req, req.query.employee);
+    scopeClause = db`and a.employee_id = ${id}`;
+  } else {
+    const visible = await scopeService.visibleEmployeeIds(req.user);
+    scopeClause = visible === null ? db`` : db`and a.employee_id = any(${visible}::uuid[])`;
+  }
 
-  const rows = await Attendance.find(filter)
-    .populate('employee', 'firstName lastName employeeCode')
-    .sort({ date: -1 })
-    .limit(5000)
-    .lean();
+  const rows = await db`
+    select ${db.unsafe(ATTENDANCE_COLS)}, e.first_name as "firstName", e.last_name as "lastName",
+           e.employee_code as "employeeCode"
+    from attendance a join employees e on e.id = a.employee_id
+    where true ${scopeClause} ${rangeClause(req.query)}
+    order by a.date desc limit 5000`;
 
   const csv = toCSV(rows, [
-    { header: 'Employee Code', map: (r) => r.employee?.employeeCode || '' },
-    { header: 'Employee', map: (r) => (r.employee ? `${r.employee.firstName} ${r.employee.lastName}` : '') },
-    { header: 'Date', map: (r) => dayjs.utc(r.date).format('YYYY-MM-DD') },
+    { key: 'employeeCode', header: 'Employee Code' },
+    { header: 'Employee', map: (r) => `${r.firstName} ${r.lastName}` },
+    { header: 'Date', map: (r) => day(r.date) },
     { key: 'status', header: 'Status' },
     { header: 'Check In', map: (r) => (r.checkIn ? dayjs.utc(r.checkIn).format('HH:mm') : '') },
     { header: 'Check Out', map: (r) => (r.checkOut ? dayjs.utc(r.checkOut).format('HH:mm') : '') },
@@ -262,34 +269,29 @@ const exportCsv = asyncHandler(async (req, res) => {
 
 /** GET /api/attendance/team-today — who is in, late, out or on leave right now. */
 const teamToday = asyncHandler(async (req, res) => {
-  const scope = await scopeService.visibleEmployeeIds(req.user);
-  const employeeFilter = { deletedAt: null, status: { $ne: 'terminated' } };
-  if (scope !== null) employeeFilter._id = { $in: scope };
-
-  const employees = await Employee.find(employeeFilter)
-    .select('firstName lastName jobTitle avatarUrl employeeCode')
-    .lean();
-
-  const records = await Attendance.find({
-    employee: { $in: employees.map((e) => e._id) },
-    date: startOfDay(new Date()),
-  }).lean();
-
-  const byEmployee = new Map(records.map((r) => [String(r.employee), r]));
-  const data = employees.map((e) => {
-    const record = byEmployee.get(String(e._id));
-    return {
-      _id: e._id,
-      name: `${e.firstName} ${e.lastName}`,
-      jobTitle: e.jobTitle,
-      avatarUrl: e.avatarUrl,
-      status: record?.status || 'not_marked',
-      checkIn: record?.checkIn || null,
-      checkOut: record?.checkOut || null,
-    };
-  });
+  const visible = await scopeService.visibleEmployeeIds(req.user);
+  const data = await db`
+    select e.id as "_id", e.first_name || ' ' || e.last_name as name, e.job_title as "jobTitle",
+           e.avatar_url as "avatarUrl",
+           coalesce(a.status::text, 'not_marked') as "status",
+           a.check_in as "checkIn", a.check_out as "checkOut"
+    from employees e
+    left join attendance a on a.employee_id = e.id and a.date = ${today()}
+    where e.deleted_at is null and e.status <> 'terminated'
+      ${visible === null ? db`` : db`and e.id = any(${visible}::uuid[])`}
+    order by e.first_name`;
 
   res.json({ success: true, data });
 });
 
-module.exports = { checkIn, checkOut, today, list, calendar, summary, upsert, exportCsv, teamToday };
+module.exports = {
+  checkIn,
+  checkOut,
+  today: todayRecord,
+  list,
+  calendar,
+  summary,
+  upsert,
+  exportCsv,
+  teamToday,
+};

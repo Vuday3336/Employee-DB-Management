@@ -1,86 +1,94 @@
 'use strict';
-const { Employee, User, Department, LeavePolicy } = require('../models');
+const { db } = require('../db');
+const { EMPLOYEE_FULL, EMPLOYEE_JOINS } = require('../db/shapes');
 const ApiError = require('../utils/ApiError');
 const asyncHandler = require('../utils/asyncHandler');
 const audit = require('../services/auditService');
 const scopeService = require('../services/scopeService');
 const reportService = require('../services/reportService');
+const { hash } = require('./authController');
 const { redactEmployee, redactEmployees } = require('../middleware/roleCheck');
-const { parsePagination, parseSort, escapeRegex, buildMeta } = require('../utils/query');
+const { parsePagination, buildMeta } = require('../utils/query');
 const { toCSV } = require('../utils/csv');
 
-const SORTABLE = ['firstName', 'lastName', 'hireDate', 'jobTitle', 'status', 'createdAt', 'employeeCode'];
-const POPULATE = [
-  { path: 'department', select: 'name code' },
-  { path: 'manager', select: 'firstName lastName jobTitle employeeCode' },
-];
+/** ?sort= is mapped through this allow-list; anything else falls back to newest first. */
+const SORTS = {
+  firstName: 'e.first_name asc',
+  '-firstName': 'e.first_name desc',
+  lastName: 'e.last_name asc',
+  '-lastName': 'e.last_name desc',
+  hireDate: 'e.hire_date asc',
+  '-hireDate': 'e.hire_date desc',
+  jobTitle: 'e.job_title asc',
+  '-jobTitle': 'e.job_title desc',
+  status: 'e.status asc',
+  '-status': 'e.status desc',
+  employeeCode: 'e.employee_code asc',
+  '-employeeCode': 'e.employee_code desc',
+  createdAt: 'e.created_at asc',
+  '-createdAt': 'e.created_at desc',
+};
 
 /** Next sequential employee code, e.g. EMP-0042. */
 async function nextEmployeeCode() {
-  const last = await Employee.findOne({}).sort({ createdAt: -1 }).select('employeeCode').lean();
-  const n = last?.employeeCode?.match(/(\d+)$/) ? Number(last.employeeCode.match(/(\d+)$/)[1]) + 1 : 1;
-  return `EMP-${String(n).padStart(4, '0')}`;
-}
-
-/** Default leave buckets seeded from the active policies when an employee is created. */
-async function initialLeaveBalances() {
-  const policies = await LeavePolicy.find({ isActive: true }).lean();
-  return policies.map((p) => ({ type: p.type, entitled: p.annualQuota, used: 0, carriedForward: 0 }));
+  const [row] = await db`
+    select coalesce(max(nullif(regexp_replace(employee_code, '\\D', '', 'g'), '')::int), 0) + 1 as next
+    from employees`;
+  return `EMP-${String(row.next).padStart(4, '0')}`;
 }
 
 /**
- * Builds the Mongo filter for a list request, intersecting the caller's visibility
+ * Builds the WHERE clause for a list request, intersecting the caller's visibility
  * scope with whatever they asked for. A manager who passes ?department=<other team>
  * still only ever gets their own sub-tree back.
  */
-async function buildListFilter(req, query) {
-  const filter = query.includeDeleted && req.user.role === 'admin' ? {} : { deletedAt: null };
-
+async function listWhere(req, q) {
   const visible = await scopeService.visibleEmployeeIds(req.user);
-  if (visible !== null) filter._id = { $in: visible };
+  const includeDeleted = q.includeDeleted && req.user.role === 'admin';
 
-  if (query.department) filter.department = query.department;
-  if (query.status) filter.status = query.status;
-  if (query.employmentType) filter.employmentType = query.employmentType;
-  if (query.manager) filter.manager = query.manager;
-
-  if (query.q) {
-    const rx = new RegExp(escapeRegex(query.q), 'i');
-    filter.$or = [
-      { firstName: rx },
-      { lastName: rx },
-      { workEmail: rx },
-      { jobTitle: rx },
-      { employeeCode: rx },
-    ];
-  }
-  return filter;
+  return db`
+    where true
+      ${includeDeleted ? db`` : db`and e.deleted_at is null`}
+      ${visible === null ? db`` : db`and e.id = any(${visible}::uuid[])`}
+      ${q.department ? db`and e.department_id = ${q.department}` : db``}
+      ${q.status ? db`and e.status = ${q.status}` : db``}
+      ${q.employmentType ? db`and e.employment_type = ${q.employmentType}` : db``}
+      ${q.manager ? db`and e.manager_id = ${q.manager}` : db``}
+      ${
+        q.q
+          ? db`and (e.first_name || ' ' || e.last_name || ' ' || e.work_email || ' ' ||
+                    e.job_title || ' ' || e.employee_code) ilike ${'%' + q.q + '%'}`
+          : db``
+      }`;
 }
 
 /** GET /api/employees — search, filter, sort, paginate. */
 const list = asyncHandler(async (req, res) => {
-  const query = req.validatedQuery || req.query;
-  const { page, limit, skip } = parsePagination(query);
-  const sort = parseSort(query.sort, SORTABLE, { createdAt: -1 });
-  const filter = await buildListFilter(req, query);
+  const q = req.validatedQuery || req.query;
+  const { page, limit, skip } = parsePagination(q);
+  const where = await listWhere(req, q);
+  const order = SORTS[q.sort] || SORTS['-createdAt'];
 
-  const [items, total] = await Promise.all([
-    Employee.find(filter).populate(POPULATE).sort(sort).skip(skip).limit(limit).lean(),
-    Employee.countDocuments(filter),
+  const [items, [{ count }]] = await Promise.all([
+    db`select ${db.unsafe(EMPLOYEE_FULL)} from employees e ${db.unsafe(EMPLOYEE_JOINS)} ${where}
+       order by ${db.unsafe(order)} limit ${limit} offset ${skip}`,
+    db`select count(*)::int from employees e ${where}`,
   ]);
 
   res.json({
     success: true,
     data: redactEmployees(items, req.user),
-    meta: buildMeta({ page, limit, total }),
+    meta: buildMeta({ page, limit, total: count }),
   });
 });
 
 /** GET /api/employees/export — same filter as the list, streamed as CSV. */
 const exportCsv = asyncHandler(async (req, res) => {
-  const query = req.validatedQuery || req.query;
-  const filter = await buildListFilter(req, query);
-  const rows = await Employee.find(filter).populate(POPULATE).sort({ employeeCode: 1 }).lean();
+  const q = req.validatedQuery || req.query;
+  const where = await listWhere(req, q);
+  const rows = await db`
+    select ${db.unsafe(EMPLOYEE_FULL)} from employees e ${db.unsafe(EMPLOYEE_JOINS)} ${where}
+    order by e.employee_code`;
 
   const columns = [
     { key: 'employeeCode', header: 'Employee Code' },
@@ -106,63 +114,84 @@ const exportCsv = asyncHandler(async (req, res) => {
 
 /** GET /api/employees/:id */
 const getOne = asyncHandler(async (req, res) => {
-  const employee = await Employee.findById(req.params.id).populate(POPULATE).lean();
+  const [employee] = await db`
+    select ${db.unsafe(EMPLOYEE_FULL)} from employees e ${db.unsafe(EMPLOYEE_JOINS)}
+    where e.id = ${req.params.id}`;
   if (!employee || (employee.deletedAt && req.user.role !== 'admin')) {
     throw ApiError.notFound('Employee not found');
   }
-  const [directReports, account] = await Promise.all([
-    Employee.find({ manager: employee._id, deletedAt: null })
-      .select('firstName lastName jobTitle avatarUrl employeeCode')
-      .lean(),
-    User.findOne({ employee: employee._id }).select('email role isActive lastLoginAt').lean(),
+
+  const [directReports, [account]] = await Promise.all([
+    db`select e.id as "_id", e.first_name as "firstName", e.last_name as "lastName",
+              e.job_title as "jobTitle", e.avatar_url as "avatarUrl", e.employee_code as "employeeCode"
+       from employees e where e.manager_id = ${employee._id} and e.deleted_at is null
+       order by e.first_name`,
+    db`select id as "_id", email, role, is_active as "isActive", last_login_at as "lastLoginAt"
+       from users where employee_id = ${employee._id}`,
   ]);
 
   res.json({
     success: true,
-    data: { ...redactEmployee(employee, req.user), directReports, account },
+    data: { ...redactEmployee(employee, req.user), directReports, account: account || null },
   });
 });
 
 /** POST /api/employees — admin only. Optionally provisions the login account too. */
 const create = asyncHandler(async (req, res) => {
-  const { createAccount, accountRole, accountPassword, ...payload } = req.body;
+  const { createAccount, accountRole, accountPassword, ...p } = req.body;
 
-  if (payload.manager) {
-    const manager = await Employee.findById(payload.manager).lean();
-    if (!manager) throw ApiError.badRequest('Manager does not exist');
+  if (p.manager) {
+    const [m] = await db`select id from employees where id = ${p.manager} and deleted_at is null`;
+    if (!m) throw ApiError.badRequest('Manager does not exist');
   }
-  if (payload.department) {
-    const dept = await Department.findById(payload.department).lean();
-    if (!dept) throw ApiError.badRequest('Department does not exist');
+  if (p.department) {
+    const [d] = await db`select id from departments where id = ${p.department}`;
+    if (!d) throw ApiError.badRequest('Department does not exist');
+  }
+  if (createAccount && !accountPassword) {
+    throw ApiError.badRequest('accountPassword is required to create a login');
   }
 
-  const employee = await Employee.create({
-    ...payload,
-    employeeCode: payload.employeeCode || (await nextEmployeeCode()),
-    leaveBalances: await initialLeaveBalances(),
+  const code = p.employeeCode || (await nextEmployeeCode());
+
+  // One transaction: the employee, their opening leave balances, and optionally
+  // the login account either all land or none do.
+  const { employee, account } = await db.begin(async (tx) => {
+    const [row] = await tx`
+      insert into employees (employee_code, first_name, last_name, work_email, phone, department_id,
+                             job_title, manager_id, hire_date, employment_type, status, salary, location, avatar_url)
+      values (${code}, ${p.firstName}, ${p.lastName}, ${p.workEmail}, ${p.phone || null},
+              ${p.department || null}, ${p.jobTitle}, ${p.manager || null}, ${p.hireDate},
+              ${p.employmentType || 'full_time'}, ${p.status || 'active'}, ${p.salary ?? 0},
+              ${p.location || null}, ${p.avatarUrl || null})
+      returning *`;
+
+    await tx`
+      insert into leave_balances (employee_id, type, entitled, used, carried_forward)
+      select ${row.id}, type, annual_quota, 0, 0 from leave_policies where is_active = true`;
+
+    let created = null;
+    if (createAccount) {
+      const [u] = await tx`
+        insert into users (email, password_hash, role, employee_id)
+        values (${row.work_email}, ${await hash(accountPassword)}, ${accountRole || 'employee'}, ${row.id})
+        returning id, email, role`;
+      created = u;
+    }
+    return { employee: row, account: created };
   });
 
-  let account = null;
-  if (createAccount) {
-    if (!accountPassword) throw ApiError.badRequest('accountPassword is required to create a login');
-    const user = new User({
-      email: employee.workEmail,
-      role: accountRole || 'employee',
-      employee: employee._id,
-    });
-    await user.setPassword(accountPassword);
-    await user.save();
-    account = { id: user._id, email: user.email, role: user.role };
-  }
+  const [full] = await db`
+    select ${db.unsafe(EMPLOYEE_FULL)} from employees e ${db.unsafe(EMPLOYEE_JOINS)} where e.id = ${employee.id}`;
 
   await audit.record(req, {
     action: 'employee.create',
     entity: 'Employee',
-    entityId: employee._id,
-    after: employee.toObject(),
+    entityId: employee.id,
+    after: { employeeCode: code, workEmail: p.workEmail, jobTitle: p.jobTitle },
   });
 
-  res.status(201).json({ success: true, data: { ...redactEmployee(employee, req.user), account } });
+  res.status(201).json({ success: true, data: { ...redactEmployee(full, req.user), account } });
 });
 
 /**
@@ -172,185 +201,191 @@ const create = asyncHandler(async (req, res) => {
  */
 const MANAGER_EDITABLE = ['jobTitle', 'location', 'phone', 'status', 'employmentType', 'avatarUrl'];
 const SELF_EDITABLE = ['phone', 'location', 'avatarUrl'];
+const COLUMN = {
+  firstName: 'first_name',
+  lastName: 'last_name',
+  workEmail: 'work_email',
+  phone: 'phone',
+  department: 'department_id',
+  jobTitle: 'job_title',
+  hireDate: 'hire_date',
+  employmentType: 'employment_type',
+  status: 'status',
+  salary: 'salary',
+  location: 'location',
+  avatarUrl: 'avatar_url',
+};
 
 const update = asyncHandler(async (req, res) => {
-  const employee = await Employee.findById(req.params.id);
-  if (!employee || employee.deletedAt) throw ApiError.notFound('Employee not found');
+  const [employee] = await db`select * from employees where id = ${req.params.id}`;
+  if (!employee || employee.deleted_at) throw ApiError.notFound('Employee not found');
 
-  let allowed = Object.keys(req.body);
+  let allowed = Object.keys(req.body).filter((f) => COLUMN[f]);
   if (req.user.role === 'manager') {
-    const isSelf = String(employee._id) === String(req.user.employee);
+    const isSelf = String(employee.id) === String(req.user.employee);
     allowed = allowed.filter((f) => (isSelf ? SELF_EDITABLE : MANAGER_EDITABLE).includes(f));
   } else if (req.user.role === 'employee') {
     allowed = allowed.filter((f) => SELF_EDITABLE.includes(f));
   }
 
   const rejected = Object.keys(req.body).filter((f) => !allowed.includes(f));
-  if (!allowed.length) {
-    throw ApiError.forbidden(`Your role cannot change: ${rejected.join(', ')}`);
-  }
+  if (!allowed.length) throw ApiError.forbidden(`Your role cannot change: ${rejected.join(', ')}`);
 
-  if (req.body.manager && String(req.body.manager) === String(employee._id)) {
-    throw ApiError.badRequest('An employee cannot report to themselves');
-  }
-  // Reassigning a manager must not create a reporting cycle.
-  if (req.body.manager) {
-    const subtree = await scopeService.getSubordinateIds(employee._id, { includeSelf: false });
-    if (subtree.some((id) => String(id) === String(req.body.manager))) {
-      throw ApiError.badRequest('That change would create a reporting loop');
-    }
-  }
-
-  const before = employee.toObject();
-  allowed.forEach((field) => {
-    employee[field] = req.body[field];
+  const patch = {};
+  allowed.forEach((f) => {
+    patch[COLUMN[f]] = req.body[f];
   });
-  if (employee.status === 'terminated' && !employee.terminatedAt) employee.terminatedAt = new Date();
-  await employee.save();
+  if (patch.status === 'terminated' && !employee.terminated_at) patch.terminated_at = new Date();
+
+  const before = Object.fromEntries(allowed.map((f) => [f, employee[COLUMN[f]]]));
+  await db`update employees set ${db(patch)} where id = ${employee.id}`;
+
+  const [full] = await db`
+    select ${db.unsafe(EMPLOYEE_FULL)} from employees e ${db.unsafe(EMPLOYEE_JOINS)} where e.id = ${employee.id}`;
 
   await audit.record(req, {
     action: 'employee.update',
     entity: 'Employee',
-    entityId: employee._id,
+    entityId: employee.id,
     before,
-    after: employee.toObject(),
+    after: Object.fromEntries(allowed.map((f) => [f, req.body[f]])),
   });
 
   res.json({
     success: true,
-    data: redactEmployee(employee, req.user),
+    data: redactEmployee(full, req.user),
     ...(rejected.length ? { ignoredFields: rejected } : {}),
   });
 });
 
 /**
  * DELETE /api/employees/:id — soft delete.
- * The record is flagged, the login is disabled and direct reports are re-pointed at
- * the departing employee's own manager. Attendance, leave and review history stay
+ * The record is flagged, the login disabled and direct reports re-pointed at the
+ * departing employee's own manager. Attendance, leave and review history stay
  * intact, which is the whole reason this is not a hard delete.
  */
 const deactivate = asyncHandler(async (req, res) => {
-  const employee = await Employee.findById(req.params.id);
-  if (!employee || employee.deletedAt) throw ApiError.notFound('Employee not found');
-  if (String(employee._id) === String(req.user.employee)) {
+  const [employee] = await db`select * from employees where id = ${req.params.id}`;
+  if (!employee || employee.deleted_at) throw ApiError.notFound('Employee not found');
+  if (String(employee.id) === String(req.user.employee)) {
     throw ApiError.badRequest('You cannot deactivate your own record');
   }
 
-  const before = employee.toObject();
-  employee.deletedAt = new Date();
-  employee.status = 'terminated';
-  employee.terminatedAt = employee.terminatedAt || new Date();
-  await employee.save();
-
-  const [reassigned] = await Promise.all([
-    Employee.updateMany({ manager: employee._id }, { manager: employee.manager }),
-    User.updateOne({ employee: employee._id }, { isActive: false, $inc: { tokenVersion: 1 } }),
-  ]);
+  const reassigned = await db.begin(async (tx) => {
+    await tx`
+      update employees
+      set deleted_at = now(), status = 'terminated', terminated_at = coalesce(terminated_at, now())
+      where id = ${employee.id}`;
+    const moved = await tx`
+      update employees set manager_id = ${employee.manager_id} where manager_id = ${employee.id} returning id`;
+    await tx`
+      update users set is_active = false, token_version = token_version + 1
+      where employee_id = ${employee.id}`;
+    return moved.length;
+  });
 
   await audit.record(req, {
     action: 'employee.deactivate',
     entity: 'Employee',
-    entityId: employee._id,
-    before,
-    after: employee.toObject(),
+    entityId: employee.id,
+    before: { status: employee.status, deletedAt: null },
+    after: { status: 'terminated', deletedAt: 'set' },
   });
 
   res.json({
     success: true,
     message: 'Employee deactivated; history preserved',
-    data: { reportsReassigned: reassigned.modifiedCount },
+    data: { reportsReassigned: reassigned },
   });
 });
 
 /** POST /api/employees/:id/restore — admin undo for a soft delete. */
 const restore = asyncHandler(async (req, res) => {
-  const employee = await Employee.findById(req.params.id);
+  const [employee] = await db`select * from employees where id = ${req.params.id}`;
   if (!employee) throw ApiError.notFound('Employee not found');
-  if (!employee.deletedAt) throw ApiError.badRequest('Employee is already active');
+  if (!employee.deleted_at) throw ApiError.badRequest('Employee is already active');
 
-  employee.deletedAt = null;
-  employee.status = 'active';
-  employee.terminatedAt = undefined;
-  await employee.save();
-  await User.updateOne({ employee: employee._id }, { isActive: true });
+  await db.begin(async (tx) => {
+    await tx`
+      update employees set deleted_at = null, status = 'active', terminated_at = null
+      where id = ${employee.id}`;
+    await tx`update users set is_active = true where employee_id = ${employee.id}`;
+  });
 
-  await audit.record(req, { action: 'employee.restore', entity: 'Employee', entityId: employee._id });
-  res.json({ success: true, data: redactEmployee(employee, req.user) });
+  const [full] = await db`
+    select ${db.unsafe(EMPLOYEE_FULL)} from employees e ${db.unsafe(EMPLOYEE_JOINS)} where e.id = ${employee.id}`;
+
+  await audit.record(req, { action: 'employee.restore', entity: 'Employee', entityId: employee.id });
+  res.json({ success: true, data: redactEmployee(full, req.user) });
 });
 
 /** PATCH /api/employees/:id/manager — admin reassignment with cycle protection. */
 const assignManager = asyncHandler(async (req, res) => {
   const { manager } = req.body;
-  const employee = await Employee.findById(req.params.id);
-  if (!employee || employee.deletedAt) throw ApiError.notFound('Employee not found');
+  const [employee] = await db`select * from employees where id = ${req.params.id}`;
+  if (!employee || employee.deleted_at) throw ApiError.notFound('Employee not found');
 
   if (manager) {
-    if (String(manager) === String(employee._id)) {
+    if (String(manager) === String(employee.id)) {
       throw ApiError.badRequest('An employee cannot report to themselves');
     }
-    const target = await Employee.findById(manager).lean();
-    if (!target || target.deletedAt) throw ApiError.badRequest('Manager does not exist');
-    const subtree = await scopeService.getSubordinateIds(employee._id, { includeSelf: false });
+    const [target] = await db`select id from employees where id = ${manager} and deleted_at is null`;
+    if (!target) throw ApiError.badRequest('Manager does not exist');
+
+    // Moving someone under their own subordinate would close a loop in the tree.
+    const subtree = await scopeService.getSubordinateIds(employee.id, { includeSelf: false });
     if (subtree.some((id) => String(id) === String(manager))) {
       throw ApiError.badRequest('That change would create a reporting loop');
     }
   }
 
-  const before = { manager: employee.manager };
-  employee.manager = manager || null;
-  await employee.save();
+  await db`update employees set manager_id = ${manager || null} where id = ${employee.id}`;
+  const [full] = await db`
+    select ${db.unsafe(EMPLOYEE_FULL)} from employees e ${db.unsafe(EMPLOYEE_JOINS)} where e.id = ${employee.id}`;
 
   await audit.record(req, {
     action: 'employee.assign_manager',
     entity: 'Employee',
-    entityId: employee._id,
-    before,
-    after: { manager: employee.manager },
+    entityId: employee.id,
+    before: { manager: employee.manager_id },
+    after: { manager: manager || null },
   });
 
-  res.json({ success: true, data: redactEmployee(employee, req.user) });
+  res.json({ success: true, data: redactEmployee(full, req.user) });
 });
 
 /** GET /api/employees/:id/team — direct reports of one employee. */
 const team = asyncHandler(async (req, res) => {
-  const reports = await Employee.find({ manager: req.params.id, deletedAt: null })
-    .populate(POPULATE)
-    .lean();
-  res.json({ success: true, data: redactEmployees(reports, req.user) });
+  const rows = await db`
+    select ${db.unsafe(EMPLOYEE_FULL)} from employees e ${db.unsafe(EMPLOYEE_JOINS)}
+    where e.manager_id = ${req.params.id} and e.deleted_at is null
+    order by e.first_name`;
+  res.json({ success: true, data: redactEmployees(rows, req.user) });
 });
 
-/** GET /api/employees/org-chart — recursive tree built with $graphLookup. */
+/** GET /api/employees/org-chart — the reporting tree. */
 const orgChart = asyncHandler(async (req, res) => {
-  // A manager gets their own sub-tree; admins get every root.
+  if (req.user.role === 'employee') {
+    throw ApiError.forbidden('Org chart is available to managers and admins');
+  }
+  // A manager gets their own sub-tree; an admin gets every root.
   const root = req.user.role === 'manager' ? req.user.employee : req.query.root || null;
-  if (req.user.role === 'employee') throw ApiError.forbidden('Org chart is available to managers and admins');
-  const tree = await reportService.orgChart(root);
-  res.json({ success: true, data: tree });
+  res.json({ success: true, data: await reportService.orgChart(root) });
 });
 
-/** GET /api/employees/lookup — light list for dropdowns (id + name only). */
+/** GET /api/employees/lookup — light list for dropdowns. */
 const lookup = asyncHandler(async (req, res) => {
-  const filter = { deletedAt: null, status: { $ne: 'terminated' } };
   const visible = await scopeService.visibleEmployeeIds(req.user);
-  if (visible !== null) filter._id = { $in: visible };
-  if (req.query.q) {
-    const rx = new RegExp(escapeRegex(req.query.q), 'i');
-    filter.$or = [{ firstName: rx }, { lastName: rx }, { employeeCode: rx }];
-  }
-  const rows = await Employee.find(filter)
-    .select('firstName lastName jobTitle employeeCode')
-    .sort({ firstName: 1 })
-    .limit(50)
-    .lean();
-  res.json({
-    success: true,
-    data: rows.map((r) => ({
-      _id: r._id,
-      name: `${r.firstName} ${r.lastName}`,
-      jobTitle: r.jobTitle,
-      employeeCode: r.employeeCode,
-    })),
-  });
+  const rows = await db`
+    select e.id as "_id", e.first_name || ' ' || e.last_name as name,
+           e.job_title as "jobTitle", e.employee_code as "employeeCode"
+    from employees e
+    where e.deleted_at is null and e.status <> 'terminated'
+      ${visible === null ? db`` : db`and e.id = any(${visible}::uuid[])`}
+      ${req.query.q ? db`and (e.first_name || ' ' || e.last_name || ' ' || e.employee_code) ilike ${'%' + req.query.q + '%'}` : db``}
+    order by e.first_name
+    limit 100`;
+  res.json({ success: true, data: rows });
 });
 
 module.exports = {
@@ -365,5 +400,6 @@ module.exports = {
   orgChart,
   lookup,
   exportCsv,
+  nextEmployeeCode,
 };
 

@@ -1,113 +1,123 @@
 'use strict';
-const { User, AuditLog, LeavePolicy, Holiday, Notification, Employee } = require('../models');
+const { db } = require('../db');
+const { USER_COLS } = require('../db/shapes');
+const { ROLES } = require('../db/enums');
 const ApiError = require('../utils/ApiError');
 const asyncHandler = require('../utils/asyncHandler');
 const audit = require('../services/auditService');
-const { parsePagination, buildMeta, escapeRegex } = require('../utils/query');
-const { startOfDay } = require('../utils/dates');
+const { hash } = require('./authController');
+const { parsePagination, buildMeta } = require('../utils/query');
+const { dayjs } = require('../utils/dates');
 
 /* ------------------------------- users ---------------------------------- */
+
+const USER_SELECT = `
+  ${USER_COLS},
+  case when e.id is null then null else
+    json_build_object('_id', e.id, 'firstName', e.first_name, 'lastName', e.last_name,
+                      'employeeCode', e.employee_code, 'jobTitle', e.job_title) end as "employee"
+`;
 
 /** GET /api/users — admin only. */
 const listUsers = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req.query);
-  const filter = {};
-  if (req.query.role) filter.role = req.query.role;
-  if (req.query.q) filter.email = new RegExp(escapeRegex(req.query.q), 'i');
+  const where = db`
+    where true
+      ${req.query.role ? db`and u.role = ${req.query.role}` : db``}
+      ${req.query.q ? db`and u.email ilike ${'%' + req.query.q + '%'}` : db``}`;
 
-  const [items, total] = await Promise.all([
-    User.find(filter)
-      .populate('employee', 'firstName lastName employeeCode jobTitle')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    User.countDocuments(filter),
+  const [items, [{ count }]] = await Promise.all([
+    db`select ${db.unsafe(USER_SELECT)} from users u left join employees e on e.id = u.employee_id
+       ${where} order by u.created_at desc limit ${limit} offset ${skip}`,
+    db`select count(*)::int from users u ${where}`,
   ]);
 
-  res.json({ success: true, data: items, meta: buildMeta({ page, limit, total }) });
+  res.json({ success: true, data: items, meta: buildMeta({ page, limit, total: count }) });
 });
 
 /** POST /api/users — the only path that can mint a manager or admin account. */
 const createUser = asyncHandler(async (req, res) => {
   const { email, password, role, employee } = req.body;
 
-  if (await User.findOne({ email })) throw ApiError.conflict('An account with that email already exists');
+  const [exists] = await db`select id from users where email = ${email}`;
+  if (exists) throw ApiError.conflict('An account with that email already exists');
+
   if (employee) {
-    const record = await Employee.findById(employee).lean();
+    const [record] = await db`select id from employees where id = ${employee}`;
     if (!record) throw ApiError.badRequest('Employee record does not exist');
-    if (await User.findOne({ employee })) {
-      throw ApiError.conflict('That employee already has a login account');
-    }
+    const [linked] = await db`select id from users where employee_id = ${employee}`;
+    if (linked) throw ApiError.conflict('That employee already has a login account');
   }
 
-  const user = new User({ email, role, employee });
-  await user.setPassword(password);
-  await user.save();
+  const [row] = await db`
+    insert into users (email, password_hash, role, employee_id)
+    values (${email}, ${await hash(password)}, ${role}, ${employee || null})
+    returning ${db.unsafe(USER_COLS.replace(/u\./g, ''))}`;
 
   await audit.record(req, {
     action: 'user.create',
     entity: 'User',
-    entityId: user._id,
-    after: { email, role, employee },
+    entityId: row._id,
+    after: { email, role, employee: employee || null },
   });
 
-  res.status(201).json({ success: true, data: user.toJSON() });
+  res.status(201).json({ success: true, data: row });
 });
 
 /**
  * PATCH /api/users/:id/role
- * A role change bumps tokenVersion, so the affected session loses its elevated
+ * A role change bumps token_version, so the affected session loses its elevated
  * access on the next refresh rather than at token expiry.
  */
 const updateUserRole = asyncHandler(async (req, res) => {
   const { role } = req.body;
-  if (!User.ROLES.includes(role)) throw ApiError.badRequest('Unknown role');
+  if (!ROLES.includes(role)) throw ApiError.badRequest('Unknown role');
 
-  const user = await User.findById(req.params.id);
+  const [user] = await db`select * from users where id = ${req.params.id}`;
   if (!user) throw ApiError.notFound('User not found');
-  if (String(user._id) === String(req.user.id)) {
+  if (String(user.id) === String(req.user.id)) {
     throw ApiError.badRequest('You cannot change your own role');
   }
 
-  const before = { role: user.role };
-  user.role = role;
-  user.tokenVersion += 1;
-  await user.save();
+  await db`update users set role = ${role}, token_version = token_version + 1 where id = ${user.id}`;
 
   await audit.record(req, {
     action: 'user.role_change',
     entity: 'User',
-    entityId: user._id,
-    before,
+    entityId: user.id,
+    before: { role: user.role },
     after: { role },
   });
 
-  res.json({ success: true, data: user.toJSON() });
+  const [updated] = await db`select ${db.unsafe(USER_COLS)} from users u where u.id = ${user.id}`;
+  res.json({ success: true, data: updated });
 });
 
 /** PATCH /api/users/:id/status — enable or disable a login. */
 const setUserStatus = asyncHandler(async (req, res) => {
-  const { isActive } = req.body;
-  const user = await User.findById(req.params.id);
+  const isActive = Boolean(req.body.isActive);
+  const [user] = await db`select * from users where id = ${req.params.id}`;
   if (!user) throw ApiError.notFound('User not found');
-  if (String(user._id) === String(req.user.id)) {
+  if (String(user.id) === String(req.user.id)) {
     throw ApiError.badRequest('You cannot deactivate your own account');
   }
 
-  user.isActive = Boolean(isActive);
-  if (!user.isActive) user.tokenVersion += 1; // kill live sessions immediately
-  user.lockedUntil = undefined;
-  user.failedLoginAttempts = 0;
-  await user.save();
+  await db`
+    update users set
+      is_active = ${isActive},
+      token_version = token_version + ${isActive ? 0 : 1},
+      locked_until = null,
+      failed_login_attempts = 0
+    where id = ${user.id}`;
 
   await audit.record(req, {
-    action: user.isActive ? 'user.activate' : 'user.deactivate',
+    action: isActive ? 'user.activate' : 'user.deactivate',
     entity: 'User',
-    entityId: user._id,
+    entityId: user.id,
   });
 
-  res.json({ success: true, data: user.toJSON() });
+  const [updated] = await db`select ${db.unsafe(USER_COLS)} from users u where u.id = ${user.id}`;
+  res.json({ success: true, data: updated });
 });
 
 /* ----------------------------- audit trail ------------------------------- */
@@ -115,98 +125,113 @@ const setUserStatus = asyncHandler(async (req, res) => {
 /** GET /api/audit — admin only, read-only view of the append-only trail. */
 const listAudit = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req.query);
-  const filter = {};
-  if (req.query.entity) filter.entity = req.query.entity;
-  if (req.query.action) filter.action = new RegExp(`^${escapeRegex(req.query.action)}`);
-  if (req.query.actor) filter.actor = req.query.actor;
-  if (req.query.outcome) filter.outcome = req.query.outcome;
+  const where = db`
+    where true
+      ${req.query.entity ? db`and entity = ${req.query.entity}` : db``}
+      ${req.query.action ? db`and action like ${req.query.action + '%'}` : db``}
+      ${req.query.actor ? db`and actor_id = ${req.query.actor}` : db``}
+      ${req.query.outcome ? db`and outcome = ${req.query.outcome}` : db``}`;
 
-  const [items, total] = await Promise.all([
-    AuditLog.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-    AuditLog.countDocuments(filter),
+  const [items, [{ count }]] = await Promise.all([
+    db`select id as "_id", actor_email as "actorEmail", actor_role as "actorRole",
+              action, entity, entity_id as "entityId", changes, outcome, created_at as "createdAt"
+       from audit_logs ${where} order by created_at desc limit ${limit} offset ${skip}`,
+    db`select count(*)::int from audit_logs ${where}`,
   ]);
 
-  res.json({ success: true, data: items, meta: buildMeta({ page, limit, total }) });
+  res.json({ success: true, data: items, meta: buildMeta({ page, limit, total: count }) });
 });
 
 /* ---------------------------- leave policies ----------------------------- */
 
+const POLICY_SELECT = `
+  type, label, annual_quota::float8 as "annualQuota", accrues,
+  max_carry_forward::float8 as "maxCarryForward", max_consecutive_days as "maxConsecutiveDays",
+  min_notice_days as "minNoticeDays", requires_attachment as "requiresAttachment",
+  is_paid as "isPaid", is_active as "isActive"
+`;
+
 const listPolicies = asyncHandler(async (_req, res) => {
-  const data = await LeavePolicy.find({}).sort({ label: 1 }).lean();
-  res.json({ success: true, data });
+  const data = await db`select ${db.unsafe(POLICY_SELECT)} from leave_policies order by label`;
+  // The client keys policies by `_id` in a few places; `type` is the natural key here.
+  res.json({ success: true, data: data.map((p) => ({ ...p, _id: p.type })) });
 });
 
 const upsertPolicy = asyncHandler(async (req, res) => {
-  const before = await LeavePolicy.findOne({ type: req.body.type }).lean();
-  const policy = await LeavePolicy.findOneAndUpdate({ type: req.body.type }, req.body, {
-    upsert: true,
-    new: true,
-    runValidators: true,
-    setDefaultsOnInsert: true,
-  });
+  const b = req.body;
+  const [before] = await db`select ${db.unsafe(POLICY_SELECT)} from leave_policies where type = ${b.type}`;
 
-  await audit.record(req, {
-    action: 'policy.upsert',
-    entity: 'LeavePolicy',
-    entityId: policy._id,
-    before,
-    after: policy.toObject(),
-  });
-  res.json({ success: true, data: policy });
+  await db`
+    insert into leave_policies (type, label, annual_quota, accrues, max_carry_forward,
+                                max_consecutive_days, min_notice_days, requires_attachment, is_paid, is_active)
+    values (${b.type}, ${b.label}, ${b.annualQuota}, ${b.accrues ?? true}, ${b.maxCarryForward ?? 0},
+            ${b.maxConsecutiveDays ?? 30}, ${b.minNoticeDays ?? 0}, ${b.requiresAttachment ?? false},
+            ${b.isPaid ?? true}, ${b.isActive ?? true})
+    on conflict (type) do update set
+      label = excluded.label, annual_quota = excluded.annual_quota, accrues = excluded.accrues,
+      max_carry_forward = excluded.max_carry_forward, max_consecutive_days = excluded.max_consecutive_days,
+      min_notice_days = excluded.min_notice_days, requires_attachment = excluded.requires_attachment,
+      is_paid = excluded.is_paid, is_active = excluded.is_active`;
+
+  const [after] = await db`select ${db.unsafe(POLICY_SELECT)} from leave_policies where type = ${b.type}`;
+  await audit.record(req, { action: 'policy.upsert', entity: 'LeavePolicy', before, after });
+
+  res.json({ success: true, data: { ...after, _id: after.type } });
 });
 
 /* ------------------------------ holidays -------------------------------- */
 
 const listHolidays = asyncHandler(async (req, res) => {
-  const filter = {};
-  if (req.query.year) {
-    filter.date = {
-      $gte: new Date(`${req.query.year}-01-01T00:00:00.000Z`),
-      $lte: new Date(`${req.query.year}-12-31T23:59:59.999Z`),
-    };
-  }
-  const data = await Holiday.find(filter).sort({ date: 1 }).lean();
+  const year = req.query.year;
+  const data = await db`
+    select id as "_id", name, date, region, is_optional as "isOptional"
+    from holidays
+    where true ${year ? db`and extract(year from date) = ${Number(year)}` : db``}
+    order by date`;
   res.json({ success: true, data });
 });
 
 const createHoliday = asyncHandler(async (req, res) => {
-  const holiday = await Holiday.create({ ...req.body, date: startOfDay(req.body.date) });
-  await audit.record(req, { action: 'holiday.create', entity: 'Holiday', entityId: holiday._id });
-  res.status(201).json({ success: true, data: holiday });
+  const [row] = await db`
+    insert into holidays (name, date, region, is_optional)
+    values (${req.body.name}, ${dayjs.utc(req.body.date).format('YYYY-MM-DD')},
+            ${req.body.region || 'ALL'}, ${req.body.isOptional ?? false})
+    returning id as "_id", name, date, region, is_optional as "isOptional"`;
+
+  await audit.record(req, { action: 'holiday.create', entity: 'Holiday', entityId: row._id });
+  res.status(201).json({ success: true, data: row });
 });
 
 const deleteHoliday = asyncHandler(async (req, res) => {
-  const holiday = await Holiday.findByIdAndDelete(req.params.id);
-  if (!holiday) throw ApiError.notFound('Holiday not found');
-  await audit.record(req, { action: 'holiday.delete', entity: 'Holiday', entityId: holiday._id });
+  const [row] = await db`delete from holidays where id = ${req.params.id} returning id`;
+  if (!row) throw ApiError.notFound('Holiday not found');
+  await audit.record(req, { action: 'holiday.delete', entity: 'Holiday', entityId: row.id });
   res.json({ success: true, message: 'Holiday removed' });
 });
 
 /* ---------------------------- notifications ------------------------------ */
 
 const listNotifications = asyncHandler(async (req, res) => {
-  const filter = { user: req.user.id };
-  if (req.query.unread === 'true') filter.readAt = null;
-
-  const [items, unread] = await Promise.all([
-    Notification.find(filter).sort({ createdAt: -1 }).limit(50).lean(),
-    Notification.countDocuments({ user: req.user.id, readAt: null }),
+  const [items, [{ unread }]] = await Promise.all([
+    db`select id as "_id", type, title, message, link, read_at as "readAt", created_at as "createdAt"
+       from notifications
+       where user_id = ${req.user.id} ${req.query.unread === 'true' ? db`and read_at is null` : db``}
+       order by created_at desc limit 50`,
+    db`select count(*)::int as unread from notifications where user_id = ${req.user.id} and read_at is null`,
   ]);
-
   res.json({ success: true, data: items, meta: { unread } });
 });
 
 const markNotificationRead = asyncHandler(async (req, res) => {
-  const result = await Notification.updateOne(
-    { _id: req.params.id, user: req.user.id },
-    { readAt: new Date() }
-  );
-  if (!result.matchedCount) throw ApiError.notFound('Notification not found');
+  const [row] = await db`
+    update notifications set read_at = now()
+    where id = ${req.params.id} and user_id = ${req.user.id} returning id`;
+  if (!row) throw ApiError.notFound('Notification not found');
   res.json({ success: true, message: 'Marked as read' });
 });
 
 const markAllNotificationsRead = asyncHandler(async (req, res) => {
-  await Notification.updateMany({ user: req.user.id, readAt: null }, { readAt: new Date() });
+  await db`update notifications set read_at = now() where user_id = ${req.user.id} and read_at is null`;
   res.json({ success: true, message: 'All notifications marked as read' });
 });
 

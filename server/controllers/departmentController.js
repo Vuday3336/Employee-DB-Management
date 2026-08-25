@@ -1,87 +1,132 @@
 'use strict';
-const { Department, Employee } = require('../models');
+const { db } = require('../db');
+const { employeeMini } = require('../db/shapes');
 const ApiError = require('../utils/ApiError');
 const asyncHandler = require('../utils/asyncHandler');
 const audit = require('../services/auditService');
 
+const SELECT = `
+  d.id           as "_id",
+  d.name         as "name",
+  d.code         as "code",
+  d.description  as "description",
+  d.cost_center  as "costCenter",
+  d.is_active    as "isActive",
+  ${employeeMini('m')} as "manager",
+  (select count(*)::int from employees x
+   where x.department_id = d.id and x.deleted_at is null and x.status <> 'terminated') as "headcount"
+`;
+
 /** GET /api/departments — with live headcount. */
 const list = asyncHandler(async (req, res) => {
-  const filter = req.query.includeInactive === 'true' ? {} : { isActive: true };
-  const departments = await Department.find(filter)
-    .populate('manager', 'firstName lastName jobTitle')
-    .populate('headcount')
-    .sort({ name: 1 })
-    .lean();
-  res.json({ success: true, data: departments });
+  const data = await db`
+    select ${db.unsafe(SELECT)}
+    from departments d left join employees m on m.id = d.manager_id
+    where true ${req.query.includeInactive === 'true' ? db`` : db`and d.is_active = true`}
+    order by d.name`;
+  res.json({ success: true, data });
 });
 
 /** GET /api/departments/:id */
 const getOne = asyncHandler(async (req, res) => {
-  const department = await Department.findById(req.params.id)
-    .populate('manager', 'firstName lastName jobTitle')
-    .lean();
+  const [department] = await db`
+    select ${db.unsafe(SELECT)}
+    from departments d left join employees m on m.id = d.manager_id
+    where d.id = ${req.params.id}`;
   if (!department) throw ApiError.notFound('Department not found');
 
-  const employees = await Employee.find({ department: department._id, deletedAt: null })
-    .select('firstName lastName jobTitle employeeCode status avatarUrl')
-    .sort({ firstName: 1 })
-    .lean();
+  const employees = await db`
+    select e.id as "_id", e.first_name as "firstName", e.last_name as "lastName",
+           e.job_title as "jobTitle", e.employee_code as "employeeCode",
+           e.status, e.avatar_url as "avatarUrl"
+    from employees e
+    where e.department_id = ${department._id} and e.deleted_at is null
+    order by e.first_name`;
 
-  res.json({ success: true, data: { ...department, employees, headcount: employees.length } });
+  res.json({ success: true, data: { ...department, employees } });
 });
 
 /** POST /api/departments — admin only. */
 const create = asyncHandler(async (req, res) => {
   if (req.body.manager) {
-    const manager = await Employee.findById(req.body.manager).lean();
-    if (!manager) throw ApiError.badRequest('Manager does not exist');
+    const [m] = await db`select id from employees where id = ${req.body.manager} and deleted_at is null`;
+    if (!m) throw ApiError.badRequest('Manager does not exist');
   }
-  const department = await Department.create(req.body);
+
+  const [row] = await db`
+    insert into departments (name, code, description, manager_id, cost_center)
+    values (${req.body.name}, ${req.body.code}, ${req.body.description || null},
+            ${req.body.manager || null}, ${req.body.costCenter || null})
+    returning id`;
+
   await audit.record(req, {
     action: 'department.create',
     entity: 'Department',
-    entityId: department._id,
-    after: department.toObject(),
+    entityId: row.id,
+    after: { name: req.body.name, code: req.body.code },
   });
+
+  const [department] = await db`
+    select ${db.unsafe(SELECT)} from departments d left join employees m on m.id = d.manager_id
+    where d.id = ${row.id}`;
   res.status(201).json({ success: true, data: department });
 });
 
 /** PATCH /api/departments/:id — admin only. */
 const update = asyncHandler(async (req, res) => {
-  const department = await Department.findById(req.params.id);
-  if (!department) throw ApiError.notFound('Department not found');
+  const [existing] = await db`select * from departments where id = ${req.params.id}`;
+  if (!existing) throw ApiError.notFound('Department not found');
 
-  const before = department.toObject();
-  Object.assign(department, req.body);
-  await department.save();
+  const COLUMN = {
+    name: 'name',
+    code: 'code',
+    description: 'description',
+    manager: 'manager_id',
+    costCenter: 'cost_center',
+  };
+  const patch = {};
+  Object.keys(req.body).forEach((f) => {
+    if (COLUMN[f]) patch[COLUMN[f]] = req.body[f];
+  });
+  if (!Object.keys(patch).length) throw ApiError.badRequest('No fields to update');
+
+  await db`update departments set ${db(patch)} where id = ${existing.id}`;
 
   await audit.record(req, {
     action: 'department.update',
     entity: 'Department',
-    entityId: department._id,
-    before,
-    after: department.toObject(),
+    entityId: existing.id,
+    before: { name: existing.name, code: existing.code },
+    after: req.body,
   });
+
+  const [department] = await db`
+    select ${db.unsafe(SELECT)} from departments d left join employees m on m.id = d.manager_id
+    where d.id = ${existing.id}`;
   res.json({ success: true, data: department });
 });
 
 /**
  * DELETE /api/departments/:id
- * Archived rather than removed, and refused outright while people are still
- * assigned to it — otherwise those employee records would point at nothing.
+ * Archived rather than removed, and refused while people are still assigned to it —
+ * otherwise those employee records would point at nothing.
  */
 const archive = asyncHandler(async (req, res) => {
-  const department = await Department.findById(req.params.id);
+  const [department] = await db`select * from departments where id = ${req.params.id}`;
   if (!department) throw ApiError.notFound('Department not found');
 
-  const staff = await Employee.countDocuments({ department: department._id, deletedAt: null });
-  if (staff > 0) {
-    throw ApiError.conflict(`Reassign the ${staff} employee(s) in this department first`);
-  }
+  const [{ count }] = await db`
+    select count(*)::int from employees
+    where department_id = ${department.id} and deleted_at is null`;
+  if (count > 0) throw ApiError.conflict(`Reassign the ${count} employee(s) in this department first`);
 
-  department.isActive = false;
-  await department.save();
-  await audit.record(req, { action: 'department.archive', entity: 'Department', entityId: department._id });
+  await db`update departments set is_active = false where id = ${department.id}`;
+  await audit.record(req, {
+    action: 'department.archive',
+    entity: 'Department',
+    entityId: department.id,
+  });
+
   res.json({ success: true, message: 'Department archived' });
 });
 

@@ -1,17 +1,22 @@
 {
   "name": "empcore-server",
   "version": "1.0.0",
-  "description": "EmpCore API - Employee Management System backend",
+  "description": "EmpCore API - Employee Management System backend (Express + Postgres)",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "db": "node scripts/dev-db.js",
     "seed": "node utils/seed.js",
     "test": "cross-env NODE_ENV=test jest --runInBand --forceExit"
   },
-  "keywords": ["hr", "employee-management", "express", "mongodb"],
+  "keywords": [
+    "hr",
+    "employee-management",
+    "express",
+    "postgres",
+    "supabase"
+  ],
   "license": "MIT",
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -24,10 +29,10 @@
     "express-rate-limit": "^7.2.0",
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
-    "mongoose": "^8.3.2",
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
     "node-cron": "^3.0.3",
+    "postgres": "^3.4.9",
     "socket.io": "^4.7.5",
     "swagger-ui-express": "^5.0.0",
     "zod": "^3.23.4"
@@ -35,7 +40,6 @@
   "devDependencies": {
     "cross-env": "^7.0.3",
     "jest": "^29.7.0",
-    "mongodb-memory-server": "^9.2.0",
     "nodemon": "^3.1.0",
     "supertest": "^7.0.0"
   },
