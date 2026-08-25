@@ -1,80 +1,66 @@
 # EmpCore
 
 A role-based employee management system for HR teams and managers — employee records,
-attendance, a leave approval workflow, and performance reviews. Built on the MERN
-stack as a real internal tool rather than a CRUD tutorial.
+attendance, a leave approval workflow, and performance reviews. Built as a real
+internal tool rather than a CRUD tutorial.
 
 The interesting part is not the CRUD. It is that **authorization is enforced at the API
 layer, per record, against the live reporting tree** — so a manager cannot reach another
-manager's team by typing a different id in the URL, and the test suite proves it by
-making exactly that request. That design is written up in
+manager's team by typing a different id in the URL. That design is written up in
 **[docs/rbac.md](./docs/rbac.md)**.
 
 ```
-Node 18+   ·   MongoDB 6+   ·   React 18   ·   Express 4   ·   Tailwind 4
+Node 18+  ·  PostgreSQL (Supabase)  ·  React 18  ·  Express 4  ·  Tailwind 4
 ```
 
-**Live:** [empcore.vercel.app](https://empcore.vercel.app) — the client is deployed;
-point `VITE_API_URL` at a running API to sign in. See
-[docs/deployment.md](./docs/deployment.md).
+**Live:** [empcore.vercel.app](https://empcore.vercel.app)
+
+> **On the database.** This started on MongoDB and moved to Postgres. The data is
+> relational throughout — employees, departments, foreign keys everywhere — so
+> Postgres models it more directly. The MongoDB implementation is preserved on the
+> [`mongodb`](https://github.com/Vuday3336/Employee-DB-Management/tree/mongodb)
+> branch, and the migration commit explains each translation.
 
 ---
 
 ## Quick start
 
 ```bash
-git clone <your-repo-url> && cd EmpCore
+git clone https://github.com/Vuday3336/Employee-DB-Management.git
+cd Employee-DB-Management
 ```
 
-You need **three terminals** — a database, the API, and the web client.
+**1. Database.** Create a free project at [supabase.com](https://supabase.com) (or run
+any Postgres 14+), then apply the schema:
 
-**1. Database** — see [Database options](#database-options) below if you already have
-MongoDB running or prefer a hosted cluster.
+```bash
+psql "$DATABASE_URL" -f server/db/schema.sql
+```
+
+Or paste `server/db/schema.sql` into the Supabase SQL editor. It is idempotent, so
+re-running is safe.
+
+**2. API**
 
 ```bash
 cd server
 npm install
-cp .env.example .env
-npm run db                # local MongoDB on 27017, no system install needed
+cp .env.example .env        # then set DATABASE_URL
+npm run seed                # 20 employees, 3 months of attendance, leave, reviews
+npm run dev                 # http://localhost:5000
 ```
 
-**2. API** (second terminal)
-
-```bash
-cd server
-npm run seed              # 20 employees, 3 months of attendance, leave, reviews
-npm run dev               # http://localhost:5000
-```
-
-**3. Web client** (third terminal)
+**3. Web client** (second terminal)
 
 ```bash
 cd client
 npm install
-npm run dev               # http://localhost:5173  ← open this
+npm run dev                 # http://localhost:5173  ← open this
 ```
 
-Open **http://localhost:5173** and sign in with one of the demo accounts below.
-
-### Database options
-
-`npm run db` is the zero-install path: it reuses the real `mongod` binary that the
-test tooling already downloads, and stores data in `server/.mongo-data/` so it
-survives restarts. It is a development convenience, not a production setup.
-
-If you would rather use a proper database, skip `npm run db` and point
-`MONGO_URI` in `server/.env` at it:
-
-| Option | `MONGO_URI` |
-|---|---|
-| **MongoDB Atlas** (free tier, hosted) | `mongodb+srv://<user>:<pass>@<cluster>.mongodb.net/empcore` |
-| **MongoDB Community Server** (installed locally) | `mongodb://127.0.0.1:27017/empcore` |
-| **Docker** — `docker run -d -p 27017:27017 mongo:7` | `mongodb://127.0.0.1:27017/empcore` |
-
-Vite proxies `/api` and `/socket.io` to port 5000, so the browser stays same-origin
-and the refresh cookie behaves exactly as it would in production. If port 5000 or 5173
-is already taken on your machine, set `PORT` in `server/.env` and start the client with
-`API_PROXY=http://localhost:<your-port> npm run dev`.
+Vite proxies `/api` and `/socket.io` to port 5000, so the browser stays same-origin and
+the refresh cookie behaves as it would in production. If port 5000 is taken, set `PORT`
+in `server/.env` and start the client with `API_PROXY=http://localhost:<port> npm run dev`.
 
 ### Demo accounts
 
@@ -87,9 +73,9 @@ screens resolve to different data.
 | **Manager** | `sofia.ramirez@empcore.dev` | Only their 4 reports — approvals, reviews, team attendance |
 | **Employee** | `wei.chen@empcore.dev` | Their own profile, attendance, leave and review history |
 
-> Try signing in as the manager, copying an employee id the admin can see but they
-> cannot, and opening `/employees/<that-id>`. The API returns `403` — the restriction is
-> not a hidden link.
+> Sign in as the manager, take an employee id the admin can see but they cannot, and
+> open `/employees/<that-id>`. The API returns `403` — the restriction is not a hidden
+> link.
 
 ---
 
@@ -98,9 +84,9 @@ screens resolve to different data.
 ### Authentication
 - JWT access tokens (15 min, **in memory only**) plus an httpOnly refresh cookie scoped
   to `/api/auth`, so an XSS payload can read neither.
-- Refresh-token rotation with a `tokenVersion` counter — logging out, changing a
+- Refresh-token rotation with a `token_version` counter — logging out, changing a
   password, changing a role or disabling an account kills every outstanding token.
-- The user document is re-read on every request, so a demotion takes effect immediately
+- The user row is re-read on every request, so a demotion takes effect immediately
   rather than at token expiry.
 - Account lockout after five failed attempts; bcrypt at cost 12.
 
@@ -108,7 +94,7 @@ screens resolve to different data.
 - Full CRUD with **soft delete** — deactivating preserves attendance, leave and review
   history, disables the login, and re-points direct reports at the departing manager's
   own manager. Restorable by an admin.
-- Search, multi-field filtering, allow-listed sorting and pagination on the list.
+- Search, multi-field filtering, allow-listed sorting and pagination.
 - Field-level access control: `salary` is returned to admins and to the employee
   themselves, and stripped for everyone else — including from the CSV export's headers.
 - Per-role write allow-lists; ignored fields are reported back rather than silently
@@ -118,74 +104,75 @@ screens resolve to different data.
 ### Attendance
 - Check-in / check-out with server-side late detection against a configurable start of
   day; a sub-four-hour day is downgraded to a half day automatically.
-- Month calendar with weekends and company holidays pre-filled, so an empty cell never
-  has to be guessed at.
-- Manager corrections, upserted on `(employee, date)` — and **a manager cannot edit
+- Month calendar with weekends and company holidays pre-filled.
+- Manager corrections, upserted on `(employee_id, date)` — and **a manager cannot edit
   their own attendance**.
 - Monthly aggregation: rate, present / late / absent split, hours logged.
 
 ### Leave
-- A real state machine (`pending → approved | rejected | cancelled`) defined as data on
-  the schema, so an illegal transition is a `409` from any route that reaches it.
+- A state machine (`pending → approved | rejected | cancelled`) checked on every
+  transition, so an illegal move is a `409` from whichever route reaches it.
 - Business-day counting that excludes weekends and holidays; overlap detection; notice
-  periods, consecutive-day caps and balance checks from the policy catalogue.
-- Approving deducts balance and writes `on_leave` attendance markers; cancelling an
-  approved request releases both.
+  periods, consecutive-day caps and balance checks from the policy table.
+- Approving deducts balance and writes `on_leave` attendance markers **in one
+  transaction**; cancelling an approved request releases both.
 - **Self-approval is refused** even for a manager — visibility and approval rights are
   deliberately different predicates.
-- Every transition is appended to an immutable `history` array on the request.
+- Every transition is appended to `leave_request_history`.
 
 ### Performance reviews
 - Competency scores (1–5 across five dimensions) with the overall rating derived as
-  their mean.
+  their mean, server-side.
 - Draft → submitted → acknowledged. A draft is invisible to its subject; an
   acknowledged review is locked to everyone, including its author.
-- One review per employee per quarter, enforced by a unique compound index.
-- Employees get a read-only history with a rating trend.
+- One review per employee per quarter, enforced by a unique constraint.
 
 ### Dashboard and reporting
-- MongoDB aggregation pipelines (`$match`, `$group`, `$lookup`, `$graphLookup`,
-  `$dateToString`) for headcount by department, attendance rate and trend, leave
-  breakdown, hiring trend and average rating by department.
-- The scope is applied **inside** the `$match` stage, so the same endpoint returns the
+- SQL aggregations — `GROUP BY` with filtered aggregates, `DISTINCT ON` for
+  latest-per-employee, `to_char` bucketing for trends.
+- The scope is applied **inside the WHERE clause**, so the same endpoint returns the
   organisation's numbers to an admin and the team's numbers to a manager.
 
 ---
 
 ## Beyond the brief
 
-Features added on top of the core requirements, and the reason each is there:
-
 | Feature | Why it earns its place |
 |---|---|
-| **Interactive org chart** | One `$graphLookup` walks the self-referencing manager edge to any depth — the alternative is N queries, one per level. It is also the same traversal that powers every scope check. |
-| **Append-only audit trail** | Actor, action, before/after diff, IP and outcome for every mutating request. **Refused attempts are recorded too** — a run of `denied` rows is what privilege escalation looks like from the inside. TTL-expired after two years. |
-| **Real-time notifications** | Socket.IO authenticated with the same JWT; each socket joins a private room keyed by user id, so a notification reaches exactly one recipient without broadcasting. |
-| **Scheduled jobs** | Auto-marks yesterday's missing attendance as absent (skipping weekends and holidays), accrues leave monthly against policy caps, and nudges approvers on requests older than three days. |
-| **Leave policy engine** | Quotas, accrual, carry-forward, notice periods and paid/unpaid handling are configuration rows, not hard-coded constants. |
-| **Holiday calendar** | Feeds the business-day calculation and the auto-absent job from one place. |
+| **Interactive org chart** | A `WITH RECURSIVE` CTE walks the self-referencing `manager_id` edge to any depth in one query — the alternative is N queries, one per level. It is the same traversal that powers every scope check. |
+| **Append-only audit trail** | Actor, action, before/after diff, IP and outcome for every mutating request. **Refused attempts are recorded too** — a run of `denied` rows is what privilege escalation looks like from the inside. |
+| **RLS lockdown** | Supabase publishes every table through PostgREST using an anon key that ships to the browser. RLS is enabled with no policies so that path is closed and the Express API stays the only way in. |
+| **Real-time notifications** | Socket.IO authenticated with the same JWT; each socket joins a private room keyed by user id. *(Not active on the Vercel deployment — see below.)* |
+| **Scheduled jobs** | Auto-marks missing attendance as absent, accrues leave monthly against policy caps, nudges approvers on stale requests. The two that must not silently stop — the daily attendance close-out and data retention — also run as `pg_cron` jobs in Postgres, so they survive a serverless host with no scheduler. |
+| **Real transactions** | Creating an employee (record + opening balances + login) and approving leave (status + balance + attendance markers) are atomic. |
+| **Leave policy engine** | Quotas, accrual, carry-forward, notice periods and paid/unpaid handling are rows, not constants. |
 | **CSV export** | Employees and attendance, honouring the caller's scope *and* field-level redaction. Cells are escaped against spreadsheet formula injection. |
-| **OpenAPI 3 + Swagger UI** | Served live at `/api/docs`, with an `x-roles` extension on every operation mirroring the route guards. |
-| **Account lockout & rate limiting** | 10 auth attempts / 15 min per IP, 60 writes / min, 300 reads / min. |
-| **NoSQL injection hardening** | Mongo operator keys are stripped from every body, param and query, so `{"email": {"$ne": null}}` cannot turn a login into a match-anything query. |
-| **Zod validation** | Parsed output *replaces* the raw input, so controllers only ever see coerced, stripped values. |
-| **Dark mode, toasts, skeletons** | Theme toggle persisted per browser; every async view has explicit loading, empty and error states. |
-| **Code-split routes** | Each page is a lazy chunk — the initial bundle stays small even with charts in the tree. |
+| **OpenAPI 3 + Swagger UI** | Served at `/api/docs`, with an `x-roles` extension on every operation mirroring the route guards. |
+| **Injection hardening** | Every query is a parameterised tagged template. Operator-style keys are stripped from input, and ids are UUID-validated before reaching the query layer. |
+| **Dark mode, toasts, code-split routes** | Theme persisted per browser; every async view has explicit loading, empty and error states. |
 
 ---
 
 ## Testing
 
 ```bash
-cd server && npm test
+cd server
+DATABASE_URL_TEST=postgresql://... npm test
 ```
 
-**65 tests, all passing**, run against an in-memory MongoDB — no external database
-needed. They are the executable form of the authorization write-up:
+The suite needs a **real Postgres**, not an in-memory stand-in: the rules it verifies
+are recursive CTEs and table constraints, so faking the database would test something
+other than what runs. Point `DATABASE_URL_TEST` at a throwaway database — the suite
+builds it from `db/schema.sql` and truncates between tests. Without that variable the
+suites skip with a visible message rather than failing confusingly.
+
+> **Do not** point it at a database holding real data. The suite truncates every table.
+
+What it covers:
 
 ```
 tests/rbac.test.js        identity, role gate, record scope, redaction, soft delete, cycles
-tests/leave.test.js       business-day maths, overlap, balances, the state machine, approval boundary
+tests/leave.test.js       business-day maths, overlap, balances, the state machine, approvals
 tests/attendance.test.js  check-in/out rules, corrections, monthly aggregation, the cron job
 tests/review.test.js      draft visibility, acknowledgement, edit locking, the org chart
 ```
@@ -199,8 +186,26 @@ Representative cases:
 - `refuses to decide an already-decided request`
 - `releases the balance when an approved request is cancelled`
 - `counts only the manager team, and the whole org for an admin`
-- `revokes live sessions when the account is deactivated`
-- `strips Mongo operators from the request body`
+
+---
+
+## Deployment
+
+The client is on Vercel. The API is a Vercel serverless function, which carries one
+honest trade-off:
+
+> **Socket.IO live notifications and the `node-cron` jobs do not run on Vercel.** Both
+> need a process that outlives a request. Everything else — auth, CRUD, dashboards, the
+> org chart, the whole authorization chain — works.
+>
+> The two jobs that matter most run as **`pg_cron` schedules inside Postgres**
+> (`server/db/scheduled_jobs.sql`), so the daily attendance close-out and the audit/
+> notification retention happen regardless of where the API lives. Deploy to Render,
+> Railway, Fly or any container host (`Dockerfile` and `render.yaml` are included) to
+> get live notifications and the remaining reminders back.
+
+Full walkthrough, including the two settings that silently break auth if they disagree,
+in **[docs/deployment.md](./docs/deployment.md)**.
 
 ---
 
@@ -208,11 +213,10 @@ Representative cases:
 
 | Document | Contents |
 |---|---|
-| **[docs/rbac.md](./docs/rbac.md)** | How authorization is enforced at the API layer — the three-layer chain, `$graphLookup` scope resolution, field redaction, the state machine, and honest limitations |
-| **[docs/api_endpoints.md](./docs/api_endpoints.md)** | Every endpoint with its required roles, query parameters, status codes and examples |
+| **[docs/rbac.md](./docs/rbac.md)** | How authorization is enforced at the API layer — the three-layer chain, recursive scope resolution, field redaction, and honest limitations |
+| **[docs/api_endpoints.md](./docs/api_endpoints.md)** | Every endpoint with required roles, query parameters, status codes and examples |
 | **[docs/er_diagram.md](./docs/er_diagram.md)** | Schema relationships, the reasoning behind each modelling decision, and the index list |
-| **[docs/er_diagram.svg](./docs/er_diagram.svg)** | The ER diagram itself — scalable, theme-aware, selectable text |
-| **[docs/deployment.md](./docs/deployment.md)** | Deploying to Atlas + Render/Vercel, and why the API cannot go serverless |
+| **[docs/deployment.md](./docs/deployment.md)** | Supabase + Vercel/Render, and why the API cannot go serverless without losing features |
 | `/api/docs` | Swagger UI against the running server |
 
 ---
@@ -220,7 +224,6 @@ Representative cases:
 ## Repository layout
 
 ```
-EmpCore/
 ├── client/                      React 18 + Vite + Tailwind 4
 │   └── src/
 │       ├── pages/               One file per route (lazy-loaded)
@@ -230,23 +233,20 @@ EmpCore/
 │       ├── hooks/               useFetch with a stale-response guard, useDebounced
 │       └── lib/                 axios client with refresh-on-401, formatters
 ├── server/
-│   ├── models/                  10 Mongoose schemas
+│   ├── db/                      schema.sql · seed.sql · shapes.js (SQL→JSON) · enums.js
 │   ├── controllers/             Request handling and business rules
 │   ├── routes/                  Route table with the role guards attached
 │   ├── middleware/              auth.js · roleCheck.js · validate.js · sanitize.js · errorHandler.js
-│   ├── services/                scopeService ($graphLookup) · leaveService · reportService
+│   ├── services/                scopeService (recursive CTE) · leaveService · reportService
 │   │                            tokenService · auditService · notificationService · realtime
 │   ├── jobs/                    node-cron: auto-absent, leave accrual, approval reminders
 │   ├── validators/              Zod schemas
-│   ├── utils/                   dates · csv · query · ApiError · logger · seed
+│   ├── api/index.js             Vercel serverless entry
 │   ├── docs/openapi.js          OpenAPI 3 specification
-│   ├── tests/                   Jest + Supertest + mongodb-memory-server
-│   └── server.js
+│   ├── tests/                   Jest + Supertest against a real Postgres
+│   └── server.js                Long-running entry (Socket.IO + cron)
 ├── docs/
-│   ├── rbac.md                  ← the strongest interview talking point
-│   ├── api_endpoints.md
-│   ├── er_diagram.md
-│   └── er_diagram.svg
+├── render.yaml
 └── README.md
 ```
 
@@ -256,61 +256,34 @@ EmpCore/
 
 `server/.env` — see `.env.example` for the full list.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `PORT` | `5000` | API port |
-| `MONGO_URI` | `mongodb://127.0.0.1:27017/empcore` | Database |
-| `JWT_ACCESS_SECRET` | dev value | **Must be replaced in production** — startup refuses a `dev-` secret when `NODE_ENV=production` |
-| `JWT_REFRESH_SECRET` | dev value | Same |
-| `ACCESS_TOKEN_TTL` | `15m` | Access token lifetime |
-| `REFRESH_TOKEN_TTL` | `7d` | Refresh cookie lifetime |
-| `CLIENT_ORIGIN` | `http://localhost:5173` | CORS allow-list (comma-separated) |
-| `WORK_DAY_START` | `09:15` | Check-ins after this UTC time are recorded as late |
-| `ENABLE_CRON` | `true` | Set `false` to disable the scheduled jobs |
-
----
-
-## npm scripts
-
-**server**
-
-| Script | Does |
+| Variable | Purpose |
 |---|---|
-| `npm run db` | Local MongoDB on 27017 with no system install (data in `server/.mongo-data/`) |
-| `npm run dev` | nodemon with reload |
-| `npm start` | Production start |
-| `npm run seed` | Wipe and seed the demo organisation (`-- --keep` to append) |
-| `npm test` | Jest against an in-memory MongoDB |
-
-**client**
-
-| Script | Does |
-|---|---|
-| `npm run dev` | Vite dev server with the API proxy |
-| `npm run build` | Production build to `dist/` |
-| `npm run preview` | Serve the built bundle |
+| `DATABASE_URL` | Postgres connection string. Use Supabase's **transaction pooler** (port 6543) for serverless |
+| `JWT_ACCESS_SECRET` | **Must be replaced in production** — startup refuses a `dev-` value when `NODE_ENV=production` |
+| `JWT_REFRESH_SECRET` | A different long random string |
+| `CLIENT_ORIGIN` | CORS allow-list (comma-separated) |
+| `COOKIE_SAMESITE` | `none` when client and API are on different domains; `lax` when they share one |
+| `WORK_DAY_START` | Check-ins after this UTC time are recorded as late |
+| `ENABLE_CRON` | Scheduled jobs. Always off on Vercel |
 
 ---
 
 ## Known limitations
 
-Stated plainly rather than discovered later:
-
-- **Roles are a fixed enum, not a permission matrix.** Three roles cover this domain,
-  but "a manager who may see pay bands" would need a new role rather than a grant. A
-  production system would want per-permission assignment.
-- **Scope is recomputed on every request.** Correct, and it means a re-org takes effect
-  immediately — but it is an aggregation per scoped call. At real scale it would want
-  caching keyed on employee id, invalidated when a manager changes.
-- **`$graphLookup` is capped at `maxDepth: 10`.** Deep enough for any realistic org
-  chart, but an eleventh level would silently fall outside scope.
-- **Dates are handled in UTC throughout.** Correct and unambiguous, but a genuinely
-  multi-region deployment would need per-employee timezones for check-in times.
-- **The audit diff is shallow.** Nested arrays such as leave `history` are compared as
-  whole values, so the diff shows that the array changed rather than which element was
-  appended.
-- **No email delivery.** Notifications are in-app and real-time; wiring an SMTP
-  transport into `notificationService` is the obvious next step.
+- **Roles are a fixed enum, not a permission matrix.** "A manager who may see pay bands"
+  would need a new role rather than a grant.
+- **Scope is recomputed on every request.** Correct, and a re-org takes effect
+  immediately, but it is a recursive query per scoped call. At scale it would want
+  caching invalidated on manager changes.
+- **`subordinate_ids()` is capped at depth 10.** Deep enough for any realistic org, but
+  an eleventh level would silently fall outside scope.
+- **Dates are handled in UTC throughout.** Unambiguous, but a multi-region deployment
+  would need per-employee timezones for check-in times.
+- **The audit diff is shallow.** Nested values are compared whole.
+- **No email delivery.** Notifications are in-app only.
+- **The demo accounts are public.** `npm run seed` gives twenty accounts the same
+  password and the login page lists three, including the admin. Remove that panel from
+  `client/src/pages/Login.jsx` before this holds anything real.
 
 ---
 

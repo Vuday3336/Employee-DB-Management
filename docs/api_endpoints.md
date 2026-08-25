@@ -37,7 +37,7 @@ An asterisk always means a record-level check runs in addition to the role gate.
 | `POST` | `/auth/register` | public | Self-registration. **Always** creates an `employee` account — a `role` in the body is ignored. |
 | `POST` | `/auth/login` | public | Returns an access token and sets the refresh cookie. Locks the account for 15 min after 5 failed attempts. |
 | `POST` | `/auth/refresh` | public (refresh cookie) | Rotates the cookie and mints a new access token. Rejects tokens issued before a logout or password change. |
-| `POST` | `/auth/logout` | any | Increments `tokenVersion`, killing every outstanding refresh token. |
+| `POST` | `/auth/logout` | any | Increments `token_version`, killing every outstanding refresh token. |
 | `GET` | `/auth/me` | any | Current principal with the linked employee record. |
 | `PATCH` | `/auth/password` | any | Changes own password and revokes all sessions. |
 
@@ -70,7 +70,7 @@ Content-Type: application/json
 | `GET` | `/employees` | admin, manager\*, employee\* | Search, filter, sort, paginate. Query: `q`, `department`, `status`, `employmentType`, `manager`, `page`, `limit`, `sort`, `includeDeleted` (admin). |
 | `POST` | `/employees` | admin | Creates the record, auto-assigns `EMP-nnnn`, seeds leave balances from policy, and optionally provisions a login. |
 | `GET` | `/employees/lookup` | admin, manager\*, employee\* | Lightweight `{_id, name, jobTitle}` list for dropdowns. |
-| `GET` | `/employees/org-chart` | admin, manager\* | Reporting tree built with a single `$graphLookup`. Managers get their own sub-tree. |
+| `GET` | `/employees/org-chart` | admin, manager\* | Reporting tree built with a recursive CTE. Managers get their own sub-tree. |
 | `GET` | `/employees/export` | admin, manager\* | CSV of the current filter. The `Salary` column is present **only** for admins. |
 | `GET` | `/employees/:id` | admin, manager\*, employee\* | Detail plus direct reports and the linked account. |
 | `PATCH` | `/employees/:id` | admin, manager\*, employee\* | Writable fields depend on role — see below. |
@@ -136,6 +136,9 @@ Authorization: Bearer <token>
 
 Attendance statuses: `present`, `late`, `half_day`, `absent`, `on_leave`, `holiday`, `weekend`.
 
+Manual corrections upsert on `(employee_id, date)`, which is a unique constraint — a
+retry or double-submit cannot create two conflicting rows for one day.
+
 ---
 
 ## Leave
@@ -173,9 +176,10 @@ Authorization: Bearer <manager token>
 { "decision": "approved", "note": "Enjoy your break" }
 ```
 
-Side effects: `days` deducted from the employee's balance (paid types only), covered
-working days upserted as `on_leave` attendance, a notification pushed over the
-websocket, and an `leave.approved` audit row written.
+Side effects, all inside **one transaction**: `days` deducted from the employee's
+balance (paid types only), covered working days upserted as `on_leave` attendance, and
+a row appended to `leave_request_history`. A notification and an `leave.approved` audit
+row follow.
 </details>
 
 ---
@@ -206,7 +210,7 @@ Competencies: `delivery`, `quality`, `collaboration`, `ownership`, `communicatio
 `GET /dashboard` returns `headcountByDepartment`, `attendance`, `leave`,
 `attendanceTrend`, `hiringTrend`, `performance` and `stalePendingApprovals`.
 The same request from a manager and an admin returns different numbers — the scope
-is applied inside the `$match` stage, not filtered afterwards.
+is applied inside the `WHERE` clause, not filtered afterwards.
 
 ---
 
@@ -236,12 +240,12 @@ is applied inside the `$match` stage, not filtered afterwards.
 | Code | When |
 |---|---|
 | `200` / `201` | Success |
-| `400` | Business-rule violation (insufficient balance, notice too short, reporting loop) |
+| `400` | Business-rule violation (insufficient balance, notice too short, reporting loop), or a malformed id |
 | `401` | Missing, invalid or expired access token |
 | `403` | Authenticated, but out of role **or** out of scope |
 | `404` | Record does not exist |
 | `409` | Illegal state transition or duplicate record |
-| `422` | Schema validation failed — see `details[]` |
+| `422` | Schema validation failed — see `details[]`. Ids must be UUIDs |
 | `429` | Rate limited (10 auth attempts / 15 min, 60 writes / min, 300 reads / min) |
 
 ---

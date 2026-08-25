@@ -38,7 +38,7 @@ const idPath = {
   name: 'id',
   in: 'path',
   required: true,
-  schema: { type: 'string', pattern: '^[0-9a-fA-F]{24}$' },
+  schema: { type: 'string', format: 'uuid' },
 };
 const pageParams = [
   { name: 'page', in: 'query', schema: { type: 'integer', minimum: 1, default: 1 } },
@@ -51,9 +51,10 @@ module.exports = {
     title: 'EmpCore API',
     version: '1.0.0',
     description:
-      'Role-based employee management API. Authorization is enforced in three layers: ' +
-      'authenticate (identity) → authorize (role) → record-level scope checks in the ' +
-      'controller. The x-roles field on each operation lists the roles the route accepts.',
+      'Role-based employee management API backed by PostgreSQL. Authorization is enforced ' +
+      'in three layers: authenticate (identity) → authorize (role) → record-level scope ' +
+      'checks resolved from the reporting tree with a recursive CTE. The x-roles field on ' +
+      'each operation lists the roles the route accepts.',
   },
   servers: [{ url: 'http://localhost:5000', description: 'Local development' }],
   tags: [
@@ -178,7 +179,7 @@ module.exports = {
       Attendance: {
         type: 'object',
         properties: {
-          _id: { type: 'string' },
+          _id: { type: 'string', format: 'uuid' },
           employee: { type: 'string' },
           date: { type: 'string', format: 'date' },
           status: {
@@ -348,7 +349,7 @@ module.exports = {
     '/api/employees/org-chart': {
       get: {
         tags: ['Employees'],
-        summary: 'Reporting tree built with $graphLookup',
+        summary: 'Reporting tree built with a recursive CTE',
         description: 'Admins get every root; a manager gets their own sub-tree.',
         security: bearer,
         'x-roles': ['admin', 'manager'],
@@ -677,7 +678,7 @@ module.exports = {
     '/api/dashboard': {
       get: {
         tags: ['Dashboard'],
-        summary: 'Scoped KPI snapshot built from aggregation pipelines',
+        summary: 'Scoped KPI snapshot built from SQL aggregations',
         description:
           'Every metric is restricted to the caller\'s visible employee set, so a manager sees their team and an admin sees the organisation.',
         security: bearer,

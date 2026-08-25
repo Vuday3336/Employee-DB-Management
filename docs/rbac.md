@@ -50,9 +50,10 @@ request** rather than trusting the JWT payload:
 
 ```js
 const payload = verifyAccessToken(token);
-const user = await User.findById(payload.sub).lean();
+const [user] = await db`
+  select id, email, role, employee_id, is_active from users where id = ${payload.sub}::uuid`;
 if (!user) throw ApiError.unauthorized('Account no longer exists');
-if (!user.isActive) throw ApiError.forbidden('Account is deactivated');
+if (!user.is_active) throw ApiError.forbidden('Account is deactivated');
 ```
 
 That extra read is deliberate. A JWT is a snapshot: if an admin demotes a manager or
@@ -63,7 +64,7 @@ long as the token TTL.
 
 Two mechanisms back it up:
 
-- **`tokenVersion`** on the user document is embedded in every refresh token. Logging
+- **`token_version`** on the user row is embedded in every refresh token. Logging
   out, changing a password, changing a role or disabling an account increments it,
   which invalidates every refresh token already in circulation even though their
   signatures remain valid.
@@ -99,24 +100,40 @@ This is the layer that does the real work. It answers one question — *which em
 can this principal see?* — and everything else is derived from the answer.
 
 A manager owns their whole reporting sub-tree, not just direct reports, so the check
-has to walk a self-referencing edge. MongoDB does that in one round trip:
+has to walk a self-referencing edge. Postgres does that with a recursive CTE, wrapped
+in a function so every caller gets the identical rule:
 
-```js
-// Employee.manager → Employee._id, walked to arbitrary depth
-{ $graphLookup: {
-    from: 'employees',
-    startWith: '$_id',
-    connectFromField: '_id',
-    connectToField: 'manager',
-    as: 'subtree',
-    maxDepth: 10,
-    restrictSearchWithMatch: { deletedAt: null },
-} }
+```sql
+create or replace function subordinate_ids(root uuid, max_depth integer default 10)
+returns table (id uuid)
+language sql stable
+set search_path = public, pg_temp
+as $$
+  with recursive tree as (
+    select e.id, 0 as depth
+    from employees e
+    where e.id = root and e.deleted_at is null
+  union all
+    select e.id, t.depth + 1
+    from employees e
+    join tree t on e.manager_id = t.id
+    where e.deleted_at is null and t.depth < max_depth
+  )
+  select tree.id from tree;
+$$;
 ```
 
 The alternative — recursing from the application with one query per level — turns a
-single request into N round trips and gets slower as the org grows. `$graphLookup`
-keeps the traversal next to the data.
+single request into N round trips and gets slower as the org grows. Keeping the
+traversal in the database means one round trip regardless of depth.
+
+Two details are load-bearing. `deleted_at is null` appears in *both* arms, so a
+soft-deleted manager cannot drag their sub-tree back into scope. And `search_path` is
+pinned, so the function cannot be tricked into resolving `employees` to another table
+by a caller-controlled path.
+
+> This project previously ran on MongoDB, where the same traversal was a `$graphLookup`
+> stage. The rule did not change; only its expression did.
 
 That produces the single source of truth:
 
@@ -139,9 +156,14 @@ string cannot widen the result set:
 
 ```js
 const visible = await scopeService.visibleEmployeeIds(req.user);
-if (visible !== null) filter._id = { $in: visible };
-if (query.department) filter.department = query.department;   // narrows, never widens
+
+db`where e.deleted_at is null
+   ${visible === null ? db`` : db`and e.id = any(${visible}::uuid[])`}
+   ${q.department ? db`and e.department_id = ${q.department}` : db``}`;
 ```
+
+Each fragment is `and`-ed on, so a filter the caller supplies can only ever narrow the
+result set, never widen it.
 
 **2. Single-record routes** run `canAccessEmployee` before the controller:
 
@@ -152,15 +174,17 @@ employeeRoutes.get('/:id', validate({ params: v.idParam }), canAccessEmployee('i
 This is what makes URL-guessing pointless. The link is not in the manager's UI, but the
 reason they cannot open it is that the server refuses the id.
 
-**3. Aggregations** apply it inside the pipeline's `$match`, not as a post-filter:
+**3. Aggregations** apply it inside the `WHERE` clause, not as a post-filter:
 
 ```js
-const scopeMatch = (ids, field = '_id') => (ids === null ? {} : { [field]: { $in: ids.map(oid) } });
+const scoped = (ids, column) =>
+  ids === null ? db`` : db`and ${db.unsafe(column)} = any(${ids}::uuid[])`;
 
-Employee.aggregate([
-  { $match: { deletedAt: null, ...scopeMatch(scopeIds) } },
-  { $group: { _id: '$department', headcount: { $sum: 1 } } },
-]);
+db`select coalesce(d.name, 'Unassigned') as department, count(*)::int as headcount
+   from employees e
+   left join departments d on d.id = e.department_id
+   where e.deleted_at is null ${scoped(scopeIds, 'e.id')}
+   group by d.name`;
 ```
 
 `GET /dashboard` is therefore the same endpoint for both roles and returns genuinely
@@ -230,29 +254,28 @@ Authorization says *who may act*. The leave state machine says *what act is lega
 it lives on the model rather than in the controller:
 
 ```js
-const TRANSITIONS = {
+const LEAVE_TRANSITIONS = {
   pending:   ['approved', 'rejected', 'cancelled'],
   approved:  ['cancelled'],
   rejected:  [],
   cancelled: [],
 };
 
-leaveRequestSchema.methods.transition = function (to, { by, note } = {}) {
-  if (!this.canTransition(to)) {
-    const err = new Error(`Cannot move a ${this.status} request to ${to}`);
-    err.statusCode = 409;
-    throw err;
+function assertTransition(from, to) {
+  if (!(LEAVE_TRANSITIONS[from] || []).includes(to)) {
+    throw ApiError.conflict(`Cannot move a ${from} request to ${to}`);
   }
-  this.history.push({ from: this.status, to, by, note });
-  this.status = to;
-  // …
-};
+}
 ```
 
-Because the table is data on the schema, a second approval of an already-approved
-request is a `409` no matter which route reaches it, and every transition appends to an
-immutable `history` array — so the record carries its own explanation of how it reached
-its current state.
+Because the table is data rather than scattered `if` statements, a second approval of
+an already-approved request is a `409` no matter which route reaches it, and every
+transition appends a row to `leave_request_history` — so the record carries its own
+explanation of how it reached its current state.
+
+The side effects of an approval — the status change, the balance deduction and the
+`on_leave` attendance markers — run inside one transaction. On the document database
+these were three separate writes that could partially fail; here they cannot.
 
 ---
 
@@ -298,7 +321,7 @@ with no browser in the way:
 | Test | Asserts |
 |---|---|
 | `blocks a manager reading an employee outside their tree by id` | Layer 3 rejects a guessed URL |
-| `lets a manager read an indirect report two levels down` | `$graphLookup` covers the whole sub-tree, not just direct reports |
+| `lets a manager read an indirect report two levels down` | The recursive CTE covers the whole sub-tree, not just direct reports |
 | `hides salary from a manager but shows it to the employee and to admins` | Field-level redaction |
 | `ignores fields the caller is not allowed to write` | Write allow-list |
 | `refuses self-approval even for a manager` | Approval is narrower than visibility |
@@ -306,15 +329,17 @@ with no browser in the way:
 | `refuses to decide an already-decided request` | State machine returns 409 |
 | `releases the balance when an approved request is cancelled` | Compensating side effects |
 | `counts only the manager team, and the whole org for an admin` | Scope inside the aggregation |
-| `revokes live sessions when the account is deactivated` | Layer 1 re-read + `tokenVersion` |
+| `revokes live sessions when the account is deactivated` | Layer 1 re-read + `token_version` |
 | `rejects a manager reassignment that would create a cycle` | Tree integrity |
-| `strips Mongo operators from the request body` | `{"email": {"$ne": null}}` cannot bypass login |
+| `strips operator-style keys from the request body` | `{"email": {"$ne": null}}` cannot bypass login |
 
 ```bash
-cd server && npm test
+cd server && DATABASE_URL_TEST=postgresql://... npm test
 ```
 
-65 tests, run against an in-memory MongoDB — no external database required.
+The suite runs against a real Postgres rather than an in-memory stand-in — the rules
+above are recursive CTEs and table constraints, so a fake would be testing something
+other than what ships.
 
 ---
 
@@ -326,10 +351,16 @@ Worth stating plainly rather than being caught out by:
   domain. A real HR product would eventually want per-permission grants
   (`leave.approve`, `salary.read`) assigned to roles, so that "a manager who may see pay
   bands" does not require a new role in an enum.
-- **`maxDepth: 10` on the graph traversal.** Deep enough for any realistic org, but it
-  is a cap, and an eleventh level would silently fall out of scope.
+- **`max_depth` defaults to 10 in `subordinate_ids()`.** Deep enough for any realistic
+  org, but it is a cap, and an eleventh level would silently fall out of scope.
 - **Scope is recomputed per request.** Correct, and it means a re-org takes effect
   immediately, but it is an aggregation on every scoped call. At real scale it would
   want caching keyed on the employee id with invalidation on manager changes.
-- **The audit diff is shallow.** Nested arrays such as leave `history` are compared
-  whole, so the diff records that the array changed rather than which element was added.
+- **The audit diff is shallow.** Nested values are compared whole, so the diff records
+  that something changed rather than which element.
+- **Authorization lives entirely in the API, not in the database.** Row-level security is
+  enabled on every table with no policies, which closes Supabase's PostgREST endpoint —
+  but it is a wall, not a rule engine. A second service connecting directly with the
+  owner role would bypass every check in this document. Expressing the scope rules as
+  RLS policies would push them down to the data, at the cost of duplicating logic that
+  currently has one home.

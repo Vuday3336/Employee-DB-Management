@@ -10,6 +10,11 @@ EmpCore holds open **Socket.IO** connections for live notifications and runs
 **node-cron** jobs in process (auto-absent marking, monthly leave accrual,
 approval reminders). Both need a process that survives between requests.
 
+The current deployment runs the API on Vercel and accepts that trade: live
+notifications are off, and the jobs that matter run as `pg_cron` schedules in Postgres
+instead. Moving the API to a host with a real process turns both back on with no code
+change.
+
 On a serverless platform — Vercel Functions, Netlify Functions, Lambda — the
 Express routes would still work, but:
 
@@ -17,29 +22,54 @@ Express routes would still work, but:
   degrade to nothing.
 - The process is torn down between invocations, so `node-cron` never fires.
 
-So the client can happily go on Vercel; the API wants a host that runs a real
-process. Render's free web service, Railway, Fly.io and any container host all
-qualify.
+So the client can happily go on Vercel. The API runs there too in the current
+deployment, with the trade-off above accepted and the critical jobs moved into
+Postgres. Render's free web service, Railway, Fly.io and any container host restore
+the full feature set without a code change.
 
 ---
 
-## 1. Database — MongoDB Atlas
+## 1. Database — Supabase Postgres
 
-You need a hosted MongoDB. The free M0 tier is enough for this app.
+1. Create a free project at [supabase.com](https://supabase.com).
+2. Apply the schema: paste `server/db/schema.sql` into the SQL editor, or
+   `psql "$DATABASE_URL" -f server/db/schema.sql`. It is idempotent.
+3. Optionally apply `server/db/scheduled_jobs.sql` for `pg_cron` retention and the
+   daily attendance close-out (see below).
+4. Seed the demo organisation with `server/db/seed.sql` — **this truncates every
+   table first**, so never run it against real data.
+5. Copy the connection string from **Project Settings → Database**:
 
-1. Create a free cluster at [mongodb.com/atlas](https://www.mongodb.com/atlas).
-2. **Database Access** → add a user with a strong password.
-3. **Network Access** → allow the IP your API host uses. Render and most PaaS
-   hosts do not publish a stable egress IP on free plans, so `0.0.0.0/0` is the
-   practical setting there. Keep the database user credentials strong, since
-   that becomes your only perimeter.
-4. Copy the connection string — it looks like:
+| Connection | Port | Use for |
+|---|---|---|
+| Transaction pooler | 6543 | **Serverless** (Vercel, Lambda) — each invocation would otherwise open its own connection and exhaust the limit |
+| Session pooler / direct | 5432 | A long-running server (Render, Railway, a container) |
 
+The app detects a pooled URL and disables prepared statements automatically, since
+pgbouncer in transaction mode cannot reuse them.
+
+### Row-level security
+
+`schema.sql` enables RLS with **no policies** on every table. This is deliberate:
+Supabase publishes the whole schema through PostgREST using an anon key that ships to
+the browser, and EmpCore does its authorization in the API. Without RLS, anyone could
+read salaries straight from the REST endpoint and bypass every check. The API connects
+as the table owner, which bypasses RLS, so it is unaffected.
+
+Do not "fix" the `rls_enabled_no_policy` advisory notices by adding permissive
+policies — that would reopen the hole.
+
+### Scheduled jobs in the database
+
+`node-cron` needs a process that outlives a request, which a serverless deployment does
+not have. `server/db/scheduled_jobs.sql` therefore schedules the two jobs that must not
+silently stop — the daily attendance close-out and audit/notification retention — with
+`pg_cron`, so they run regardless of where the API lives.
+
+```sql
+select jobname, schedule, active from cron.job;
+select * from cron.job_run_details order by start_time desc limit 20;
 ```
-mongodb+srv://<user>:<password>@<cluster>.mongodb.net/empcore?retryWrites=true&w=majority
-```
-
-Make sure the database name (`empcore`) is present in the path.
 
 ---
 
@@ -53,7 +83,7 @@ The repo root has a [`render.yaml`](../render.yaml) that declares both services.
 2. Render creates `empcore-api` and `empcore-client` and generates the two JWT
    secrets automatically.
 3. Fill in the values marked `sync: false`:
-   - `MONGO_URI` → your Atlas string
+   - `DATABASE_URL` → your Supabase string
    - `CLIENT_ORIGIN` → the client URL (you'll have it after step 3 — set it then
      and redeploy)
    - `VITE_API_URL` on the client service → the API URL
@@ -77,7 +107,7 @@ docker run -p 5000:5000 --env-file .env.production empcore-api
 | Variable | Value |
 |---|---|
 | `NODE_ENV` | `production` |
-| `MONGO_URI` | Atlas connection string |
+| `DATABASE_URL` | Supabase connection string (pooler for serverless) |
 | `JWT_ACCESS_SECRET` | Long random string — startup **refuses** a `dev-` value in production |
 | `JWT_REFRESH_SECRET` | A different long random string |
 | `CLIENT_ORIGIN` | Deployed client URL, e.g. `https://empcore.vercel.app` (comma-separated for several) |
@@ -140,11 +170,11 @@ against the remote connection string:
 
 ```bash
 cd server
-MONGO_URI="mongodb+srv://…/empcore" npm run seed
+DATABASE_URL="postgresql://…" npm run seed
 ```
 
-> `npm run seed` **wipes** the collections first. Never point it at a database
-> holding real data. Pass `-- --keep` to append instead of replacing.
+> `npm run seed` **truncates every table** first. Never point it at a database
+> holding real data.
 
 ---
 
@@ -154,8 +184,8 @@ MONGO_URI="mongodb+srv://…/empcore" npm run seed
 - [ ] `https://<api>/api/docs` renders the Swagger UI
 - [ ] Signing in works, and **staying signed in after a page refresh** works
       (this is the `COOKIE_SAMESITE` check)
-- [ ] A leave request submitted by an employee appears live in the manager's
-      notification bell without a refresh (this is the Socket.IO check)
+- [ ] A leave request submitted by an employee appears in the manager's approval
+      queue (live in the bell too, if the API is on a host with a real process)
 - [ ] Signing in as the manager and requesting an employee id outside their team
       returns 403
 - [ ] Change the seeded demo passwords, or remove the demo accounts, before
