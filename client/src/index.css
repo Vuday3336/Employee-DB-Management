@@ -1,0 +1,110 @@
+@import 'tailwindcss';
+
+/* Tailwind v4 keys `dark:` off prefers-color-scheme by default; the app toggles a
+   class on <html> instead so the choice is explicit and persists per browser. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Design tokens. Everything in the UI reads from these, so the dark theme is a
+ * single class swap on <html> rather than a per-component conditional.
+ */
+@theme {
+  --color-brand-50: #eef4ff;
+  --color-brand-100: #d9e6ff;
+  --color-brand-200: #bcd3ff;
+  --color-brand-300: #8eb5ff;
+  --color-brand-400: #598cff;
+  --color-brand-500: #3363f7;
+  --color-brand-600: #1f45e4;
+  --color-brand-700: #1a35b8;
+  --color-brand-800: #1b3094;
+  --color-brand-900: #1c2d75;
+
+  --color-ink-50: #f6f7f9;
+  --color-ink-100: #eceef2;
+  --color-ink-200: #d5d9e2;
+  --color-ink-300: #b0b8c9;
+  --color-ink-400: #8591aa;
+  --color-ink-500: #66738f;
+  --color-ink-600: #515c75;
+  --color-ink-700: #434b5f;
+  --color-ink-800: #3a4051;
+  --color-ink-900: #191d27;
+  --color-ink-950: #0f1219;
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-ink-50 text-ink-900 antialiased dark:bg-ink-950 dark:text-ink-100;
+  }
+  * {
+    scrollbar-width: thin;
+  }
+}
+
+/*
+ * Tailwind v4 requires @utility (not @layer components) for classes that other
+ * rules reference through @apply — `btn` is composed by every button variant.
+ */
+@utility btn {
+  @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium
+         transition focus:outline-none focus:ring-2 focus:ring-offset-1 disabled:cursor-not-allowed
+         disabled:opacity-60 dark:focus:ring-offset-ink-900;
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-ink-200 bg-white shadow-sm dark:border-ink-800 dark:bg-ink-900;
+  }
+  .input {
+    @apply w-full rounded-lg border border-ink-300 bg-white px-3 py-2 text-sm text-ink-900 outline-none
+           transition placeholder:text-ink-400 focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20
+           disabled:cursor-not-allowed disabled:opacity-60
+           dark:border-ink-700 dark:bg-ink-950 dark:text-ink-100;
+  }
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-ink-700 dark:text-ink-300;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white hover:bg-brand-700 focus:ring-brand-500;
+  }
+  .btn-secondary {
+    @apply btn border border-ink-300 bg-white text-ink-700 hover:bg-ink-100
+           dark:border-ink-700 dark:bg-ink-900 dark:text-ink-200 dark:hover:bg-ink-800;
+  }
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
+  }
+  .btn-ghost {
+    @apply btn text-ink-600 hover:bg-ink-100 dark:text-ink-300 dark:hover:bg-ink-800;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+  .th {
+    @apply px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-ink-400;
+  }
+  .td {
+    @apply px-4 py-3 text-sm text-ink-700 dark:text-ink-200;
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-fade-up {
+  animation: fade-up 0.25s ease-out both;
+}

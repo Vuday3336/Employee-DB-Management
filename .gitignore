@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Environment — never commit real secrets
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+install-*.log
+
+# Runtime artefacts
+server/uploads/*
+!server/uploads/.gitignore
+coverage/
+.nyc_output/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Local dev database folder created by "npm run db"
+.mongo-data/
