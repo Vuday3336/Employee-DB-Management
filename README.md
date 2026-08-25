@@ -208,6 +208,7 @@ Representative cases:
 | **[docs/api_endpoints.md](./docs/api_endpoints.md)** | Every endpoint with its required roles, query parameters, status codes and examples |
 | **[docs/er_diagram.md](./docs/er_diagram.md)** | Schema relationships, the reasoning behind each modelling decision, and the index list |
 | **[docs/er_diagram.svg](./docs/er_diagram.svg)** | The ER diagram itself — scalable, theme-aware, selectable text |
+| **[docs/deployment.md](./docs/deployment.md)** | Deploying to Atlas + Render/Vercel, and why the API cannot go serverless |
 | `/api/docs` | Swagger UI against the running server |
 
 ---

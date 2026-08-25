@@ -20,6 +20,8 @@ const env = {
   CLIENT_ORIGIN: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
   WORK_DAY_START: process.env.WORK_DAY_START || '09:15',
   ENABLE_CRON: process.env.ENABLE_CRON !== 'false',
+  // 'none' for a split client/API deploy, 'lax' when both share a domain.
+  COOKIE_SAMESITE: process.env.COOKIE_SAMESITE || (process.env.NODE_ENV === 'production' ? 'none' : 'lax'),
 };
 
 env.isProd = env.NODE_ENV === 'production';
@@ -31,6 +33,10 @@ if (env.isProd) {
       throw new Error(`${key} must be set to a strong secret in production`);
     }
   });
+}
+
+if (!['none', 'lax', 'strict'].includes(env.COOKIE_SAMESITE)) {
+  throw new Error("COOKIE_SAMESITE must be one of: none, lax, strict");
 }
 
 module.exports = env;

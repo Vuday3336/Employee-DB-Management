@@ -16,8 +16,15 @@ export const setSessionLostHandler = (fn) => {
   onSessionLost = fn;
 };
 
+/**
+ * In dev the Vite proxy keeps the browser same-origin, so a relative path is
+ * enough. In production the API usually lives on its own domain — set
+ * VITE_API_URL at build time and every request (and the websocket) follows it.
+ */
+export const API_ORIGIN = import.meta.env.VITE_API_URL || '';
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: `${API_ORIGIN}/api`,
   withCredentials: true,
   timeout: 20000,
 });

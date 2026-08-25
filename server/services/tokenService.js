@@ -48,18 +48,34 @@ function verifyRefreshToken(token) {
   }
 }
 
+/**
+ * Cookie options.
+ *
+ * A split deploy (client on one domain, API on another) is cross-site as far as
+ * the browser is concerned, so the refresh cookie needs SameSite=None — anything
+ * stricter is silently dropped and every session dies on reload. SameSite=None
+ * is only honoured alongside Secure, which is why the two move together.
+ *
+ * If you serve both halves from one domain, set COOKIE_SAMESITE=lax to get CSRF
+ * protection back.
+ */
+const cookieOptions = () => ({
+  httpOnly: true,
+  secure: env.isProd || env.COOKIE_SAMESITE === 'none',
+  sameSite: env.COOKIE_SAMESITE,
+  path: '/api/auth',
+});
+
 function setRefreshCookie(res, token) {
   res.cookie(REFRESH_COOKIE, token, {
-    httpOnly: true,
-    secure: env.isProd,
-    sameSite: env.isProd ? 'strict' : 'lax',
-    path: '/api/auth',
+    ...cookieOptions(),
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
 }
 
 function clearRefreshCookie(res) {
-  res.clearCookie(REFRESH_COOKIE, { path: '/api/auth' });
+  // Must match the attributes the cookie was set with, or the browser keeps it.
+  res.clearCookie(REFRESH_COOKIE, cookieOptions());
 }
 
 module.exports = {

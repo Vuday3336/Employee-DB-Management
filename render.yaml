@@ -1,0 +1,63 @@
+# Render blueprint — deploys the API as a long-running web service and the client
+# as a static site. Render is used for the API (rather than a serverless host)
+# because EmpCore holds open Socket.IO connections and runs node-cron jobs in
+# process; both need a process that stays alive between requests.
+#
+# Usage: push this repo to GitHub, then New → Blueprint on render.com and point
+# it at the repo. Fill in the two secrets it prompts for (see below).
+
+services:
+  - type: web
+    name: empcore-api
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGO_URI
+        sync: false # set in the dashboard — your MongoDB Atlas connection string
+      - key: CLIENT_ORIGIN
+        sync: false # set to the deployed client URL once it exists
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: ACCESS_TOKEN_TTL
+        value: 15m
+      - key: REFRESH_TOKEN_TTL
+        value: 7d
+      - key: WORK_DAY_START
+        value: "09:15"
+      # Client and API sit on different domains, so the refresh cookie must be
+      # SameSite=None or the browser will refuse to send it.
+      - key: COOKIE_SAMESITE
+        value: none
+      - key: ENABLE_CRON
+        value: "true"
+
+  - type: web
+    name: empcore-client
+    runtime: static
+    rootDir: client
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false # set to the empcore-api URL, e.g. https://empcore-api.onrender.com
+    routes:
+      # Single-page app: hand every unmatched path to index.html so a refresh on
+      # /employees/123 resolves in the router instead of 404ing.
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin

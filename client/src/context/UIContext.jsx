@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { io } from 'socket.io-client';
-import api, { getAccessToken } from '../lib/api';
+import api, { getAccessToken, API_ORIGIN } from '../lib/api';
 import { useAuth } from './AuthContext';
 
 const UIContext = createContext(null);
@@ -56,7 +56,10 @@ export function UIProvider({ children }) {
     const token = getAccessToken();
     if (!token) return undefined;
 
-    const socket = io({ auth: { token }, transports: ['websocket', 'polling'] });
+    const socket = io(API_ORIGIN || undefined, {
+      auth: { token },
+      transports: ['websocket', 'polling'],
+    });
     socket.on('notification', (payload) => {
       setNotifications((current) => [payload, ...current].slice(0, 50));
       setUnread((n) => n + 1);
