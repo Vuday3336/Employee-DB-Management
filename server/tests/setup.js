@@ -19,6 +19,16 @@ const path = require('path');
  */
 const TEST_URL = process.env.DATABASE_URL_TEST;
 
+// The suite truncates every table, so refuse to run against the database the app
+// is pointed at. Losing the demo data would be annoying; losing real data would
+// not be recoverable.
+if (TEST_URL && process.env.DATABASE_URL && TEST_URL === process.env.DATABASE_URL) {
+  throw new Error(
+    'DATABASE_URL_TEST is the same as DATABASE_URL. This suite truncates every ' +
+      'table — point it at a throwaway database.'
+  );
+}
+
 if (TEST_URL) process.env.DATABASE_URL = TEST_URL;
 
 let db;
