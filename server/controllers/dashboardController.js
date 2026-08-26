@@ -6,6 +6,7 @@ const scopeService = require('../services/scopeService');
 const reportService = require('../services/reportService');
 const leaveService = require('../services/leaveService');
 const { dayjs } = require('../utils/dates');
+const logger = require('../utils/logger');
 
 const today = () => dayjs.utc().format('YYYY-MM-DD');
 
@@ -19,23 +20,23 @@ const overview = asyncHandler(async (req, res) => {
   const scope = await scopeService.visibleEmployeeIds(req.user);
   const inScope = (col) => (scope === null ? db`` : db`and ${db.unsafe(col)} = any(${scope}::uuid[])`);
 
-  const [
-    headcountByDepartment,
-    attendance,
-    leave,
-    attendanceTrend,
-    hiringTrend,
-    performance,
-    [counts],
-    stale,
-  ] = await Promise.all([
-    reportService.headcountByDepartment(scope),
-    reportService.attendanceRate(scope),
-    reportService.leaveBreakdown(scope),
-    reportService.attendanceTrend(scope, 6),
-    reportService.hiringTrend(scope, 12),
-    reportService.performanceByDepartment(scope),
-    db`
+  // Sequential rather than Promise.all: the pool is capped at one connection on
+  // serverless, so "parallel" queries only queue behind each other anyway, and
+  // a step that misbehaves is far easier to attribute when it is not racing.
+  const step = async (label, fn) => {
+    const started = Date.now();
+    const result = await fn();
+    logger.debug(`[dashboard] ${label} ${Date.now() - started}ms`);
+    return result;
+  };
+
+  const headcountByDepartment = await step('headcount', () => reportService.headcountByDepartment(scope));
+  const attendance = await step('attendanceRate', () => reportService.attendanceRate(scope));
+  const leave = await step('leaveBreakdown', () => reportService.leaveBreakdown(scope));
+  const attendanceTrend = await step('attendanceTrend', () => reportService.attendanceTrend(scope, 6));
+  const hiringTrend = await step('hiringTrend', () => reportService.hiringTrend(scope, 12));
+  const performance = await step('performance', () => reportService.performanceByDepartment(scope));
+  const [counts] = await step('kpiCounts', () => db`
       select
         (select count(*)::int from employees e
          where e.deleted_at is null and e.status <> 'terminated' ${inScope('e.id')})   as "headcount",
@@ -45,9 +46,8 @@ const overview = asyncHandler(async (req, res) => {
         (select count(*)::int from attendance a
          where a.date = ${today()} and a.status = 'on_leave' ${inScope('a.employee_id')}) as "onLeaveToday",
         (select count(*)::int from performance_reviews r
-         where r.status = 'draft' ${inScope('r.employee_id')})                        as "draftReviews"`,
-    reportService.stalePendingApprovals(scope),
-  ]);
+         where r.status = 'draft' ${inScope('r.employee_id')})                        as "draftReviews"`);
+  const stale = await step('stalePending', () => reportService.stalePendingApprovals(scope));
 
   res.json({
     success: true,

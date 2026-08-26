@@ -2,7 +2,7 @@
 const env = require('../config/env');
 
 const levels = { error: 0, warn: 1, info: 2, debug: 3 };
-const active = levels[process.env.LOG_LEVEL] ?? (env.isTest ? levels.error : levels.info);
+const active = levels[process.env.LOG_LEVEL] ?? (env.isTest ? levels.error : levels.debug);
 
 const stamp = () => new Date().toISOString();
 
