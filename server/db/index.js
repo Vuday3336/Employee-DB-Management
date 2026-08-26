@@ -5,6 +5,11 @@
  * Queries are written as tagged templates — `sql`${value}`` interpolates as a bound
  * parameter, never as string concatenation, so user input cannot alter the query.
  *
+ * A note on composition: a postgres.js query is a *thenable*. Nesting one inside
+ * another template splices it as a fragment, which is how the scope filters are
+ * built — but never return a bare fragment from an `async` function, because
+ * `await` will then execute it as a standalone statement.
+ *
  * The connection targets Supabase's transaction pooler in production because the API
  * runs as serverless functions: each invocation would otherwise open its own direct
  * connection and exhaust the server's limit under any real traffic. pgbouncer in

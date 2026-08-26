@@ -40,11 +40,16 @@ async function nextEmployeeCode() {
 /**
  * Builds the WHERE clause for a list request, intersecting the caller's visibility
  * scope with whatever they asked for. A manager who passes ?department=<other team>
- * still only ever gets their own sub-tree back.
+ * still only ever gets their own sub-tree back — every fragment is `and`-ed on, so a
+ * caller-supplied filter can only narrow the result set, never widen it.
+ *
+ * Deliberately synchronous. A postgres.js query is a *thenable*, so returning a
+ * fragment from an `async` function makes `await` execute it as a standalone
+ * statement — which for a bare `where …` is a syntax error. The scope lookup is
+ * awaited by the caller and passed in.
  */
-async function listWhere(req, q) {
-  const visible = await scopeService.visibleEmployeeIds(req.user);
-  const includeDeleted = q.includeDeleted && req.user.role === 'admin';
+function listWhere(visible, q, isAdmin) {
+  const includeDeleted = q.includeDeleted && isAdmin;
 
   return db`
     where true
@@ -66,7 +71,8 @@ async function listWhere(req, q) {
 const list = asyncHandler(async (req, res) => {
   const q = req.validatedQuery || req.query;
   const { page, limit, skip } = parsePagination(q);
-  const where = await listWhere(req, q);
+  const visible = await scopeService.visibleEmployeeIds(req.user);
+  const where = listWhere(visible, q, req.user.role === 'admin');
   const order = SORTS[q.sort] || SORTS['-createdAt'];
 
   const [items, [{ count }]] = await Promise.all([
@@ -85,7 +91,8 @@ const list = asyncHandler(async (req, res) => {
 /** GET /api/employees/export — same filter as the list, streamed as CSV. */
 const exportCsv = asyncHandler(async (req, res) => {
   const q = req.validatedQuery || req.query;
-  const where = await listWhere(req, q);
+  const visible = await scopeService.visibleEmployeeIds(req.user);
+  const where = listWhere(visible, q, req.user.role === 'admin');
   const rows = await db`
     select ${db.unsafe(EMPLOYEE_FULL)} from employees e ${db.unsafe(EMPLOYEE_JOINS)} ${where}
     order by e.employee_code`;
