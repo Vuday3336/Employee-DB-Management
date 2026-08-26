@@ -1,5 +1,5 @@
 'use strict';
-const { db } = require('../db');
+const { db, noFilter } = require('../db');
 const { employeeMini } = require('../db/shapes');
 const ApiError = require('../utils/ApiError');
 const asyncHandler = require('../utils/asyncHandler');
@@ -22,7 +22,7 @@ const list = asyncHandler(async (req, res) => {
   const data = await db`
     select ${db.unsafe(SELECT)}
     from departments d left join employees m on m.id = d.manager_id
-    where true ${req.query.includeInactive === 'true' ? db`` : db`and d.is_active = true`}
+    where true ${req.query.includeInactive === 'true' ? noFilter() : db`and d.is_active = true`}
     order by d.name`;
   res.json({ success: true, data });
 });

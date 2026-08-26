@@ -1,5 +1,5 @@
 'use strict';
-const { db } = require('../db');
+const { db, noFilter } = require('../db');
 const { USER_COLS } = require('../db/shapes');
 const { ROLES } = require('../db/enums');
 const ApiError = require('../utils/ApiError');
@@ -23,8 +23,8 @@ const listUsers = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req.query);
   const where = db`
     where true
-      ${req.query.role ? db`and u.role = ${req.query.role}` : db``}
-      ${req.query.q ? db`and u.email ilike ${'%' + req.query.q + '%'}` : db``}`;
+      ${req.query.role ? db`and u.role = ${req.query.role}` : noFilter()}
+      ${req.query.q ? db`and u.email ilike ${'%' + req.query.q + '%'}` : noFilter()}`;
 
   const [items, [{ count }]] = await Promise.all([
     db`select ${db.unsafe(USER_SELECT)} from users u left join employees e on e.id = u.employee_id
@@ -127,10 +127,10 @@ const listAudit = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req.query);
   const where = db`
     where true
-      ${req.query.entity ? db`and entity = ${req.query.entity}` : db``}
-      ${req.query.action ? db`and action like ${req.query.action + '%'}` : db``}
-      ${req.query.actor ? db`and actor_id = ${req.query.actor}` : db``}
-      ${req.query.outcome ? db`and outcome = ${req.query.outcome}` : db``}`;
+      ${req.query.entity ? db`and entity = ${req.query.entity}` : noFilter()}
+      ${req.query.action ? db`and action like ${req.query.action + '%'}` : noFilter()}
+      ${req.query.actor ? db`and actor_id = ${req.query.actor}` : noFilter()}
+      ${req.query.outcome ? db`and outcome = ${req.query.outcome}` : noFilter()}`;
 
   const [items, [{ count }]] = await Promise.all([
     db`select id as "_id", actor_email as "actorEmail", actor_role as "actorRole",
@@ -186,7 +186,7 @@ const listHolidays = asyncHandler(async (req, res) => {
   const data = await db`
     select id as "_id", name, date, region, is_optional as "isOptional"
     from holidays
-    where true ${year ? db`and extract(year from date) = ${Number(year)}` : db``}
+    where true ${year ? db`and extract(year from date) = ${Number(year)}` : noFilter()}
     order by date`;
   res.json({ success: true, data });
 });
@@ -215,7 +215,7 @@ const listNotifications = asyncHandler(async (req, res) => {
   const [items, [{ unread }]] = await Promise.all([
     db`select id as "_id", type, title, message, link, read_at as "readAt", created_at as "createdAt"
        from notifications
-       where user_id = ${req.user.id} ${req.query.unread === 'true' ? db`and read_at is null` : db``}
+       where user_id = ${req.user.id} ${req.query.unread === 'true' ? db`and read_at is null` : noFilter()}
        order by created_at desc limit 50`,
     db`select count(*)::int as unread from notifications where user_id = ${req.user.id} and read_at is null`,
   ]);

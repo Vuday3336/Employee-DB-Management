@@ -52,6 +52,16 @@ const db = new Proxy(function () {}, {
   },
 });
 
+/**
+ * An inert fragment for a conditional `and` slot.
+ *
+ * The obvious way to express "no extra filter" is an empty template, `` db`` ``.
+ * Don't: postgres.js turns that into an empty statement which never resolves, so a
+ * query containing one simply hangs until the caller times out. `and true` is
+ * always valid in the positions these appear and the planner discards it.
+ */
+const noFilter = () => db`and true`;
+
 async function healthCheck() {
   const [row] = await db`select 1 as ok`;
   return row.ok === 1;
@@ -69,4 +79,4 @@ async function init() {
   logger.info(`Postgres connected: ${host}`);
 }
 
-module.exports = { db, connect, disconnect, init, healthCheck };
+module.exports = { db, noFilter, connect, disconnect, init, healthCheck };

@@ -1,5 +1,5 @@
 'use strict';
-const { db } = require('../db');
+const { db, noFilter } = require('../db');
 const { dayjs } = require('../utils/dates');
 
 /**
@@ -9,7 +9,7 @@ const { dayjs } = require('../utils/dates');
  *
  * `scopeIds === null` means unrestricted (admin).
  */
-const scoped = (ids, column) => (ids === null ? db`` : db`and ${db.unsafe(column)} = any(${ids}::uuid[])`);
+const scoped = (ids, column) => (ids === null ? noFilter() : db`and ${db.unsafe(column)} = any(${ids}::uuid[])`);
 
 const monthStart = (d) => dayjs.utc(d).startOf('month').format('YYYY-MM-DD');
 const monthEnd = (d) => dayjs.utc(d).endOf('month').format('YYYY-MM-DD');

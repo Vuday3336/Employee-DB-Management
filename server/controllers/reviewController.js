@@ -1,5 +1,5 @@
 'use strict';
-const { db } = require('../db');
+const { db, noFilter } = require('../db');
 const { REVIEW_COLS, employeeMini } = require('../db/shapes');
 const ApiError = require('../utils/ApiError');
 const asyncHandler = require('../utils/asyncHandler');
@@ -91,7 +91,7 @@ const list = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(q);
 
   let scopeClause;
-  let statusClause = db``;
+  let statusClause = noFilter();
 
   if (req.user.role === 'employee' || q.scope === 'mine') {
     scopeClause = db`and r.employee_id = ${req.user.employee}`;
@@ -102,15 +102,15 @@ const list = asyncHandler(async (req, res) => {
     scopeClause = db`and r.employee_id = ${q.employee}`;
   } else {
     const visible = await scopeService.visibleEmployeeIds(req.user);
-    scopeClause = visible === null ? db`` : db`and r.employee_id = any(${visible}::uuid[])`;
+    scopeClause = visible === null ? noFilter() : db`and r.employee_id = any(${visible}::uuid[])`;
   }
 
   if (q.status && req.user.role !== 'employee') statusClause = db`and r.status = ${q.status}`;
 
   const where = db`
     where true ${scopeClause} ${statusClause}
-      ${q.year ? db`and r.period_year = ${q.year}` : db``}
-      ${q.quarter ? db`and r.period_quarter = ${q.quarter}` : db``}`;
+      ${q.year ? db`and r.period_year = ${q.year}` : noFilter()}
+      ${q.quarter ? db`and r.period_quarter = ${q.quarter}` : noFilter()}`;
 
   const [items, [{ count }]] = await Promise.all([
     db`select ${db.unsafe(SELECT)} from performance_reviews r ${db.unsafe(JOINS)} ${where}

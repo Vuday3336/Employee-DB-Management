@@ -1,5 +1,5 @@
 'use strict';
-const { db } = require('../db');
+const { db, noFilter } = require('../db');
 const { LEAVE_COLS, LEAVE_HISTORY, employeeMini } = require('../db/shapes');
 const { LEAVE_TRANSITIONS } = require('../db/enums');
 const ApiError = require('../utils/ApiError');
@@ -121,7 +121,7 @@ const list = asyncHandler(async (req, res) => {
     scopeClause = db`and l.employee_id = ${q.employee}`;
   } else {
     const visible = await scopeService.visibleEmployeeIds(req.user);
-    const base = visible === null ? db`` : db`and l.employee_id = any(${visible}::uuid[])`;
+    const base = visible === null ? noFilter() : db`and l.employee_id = any(${visible}::uuid[])`;
     // "team" means my reports, not my own requests.
     scopeClause =
       q.scope === 'team' && req.user.employee
@@ -131,10 +131,10 @@ const list = asyncHandler(async (req, res) => {
 
   const where = db`
     where true ${scopeClause}
-      ${q.status ? db`and l.status = ${q.status}` : db``}
-      ${q.type ? db`and l.type = ${q.type}` : db``}
-      ${q.from ? db`and l.start_date >= ${day(q.from)}` : db``}
-      ${q.to ? db`and l.start_date <= ${day(q.to)}` : db``}`;
+      ${q.status ? db`and l.status = ${q.status}` : noFilter()}
+      ${q.type ? db`and l.type = ${q.type}` : noFilter()}
+      ${q.from ? db`and l.start_date >= ${day(q.from)}` : noFilter()}
+      ${q.to ? db`and l.start_date <= ${day(q.to)}` : noFilter()}`;
 
   const [items, [{ count }]] = await Promise.all([
     db`select ${db.unsafe(SELECT)} from leave_requests l join employees e on e.id = l.employee_id
@@ -154,7 +154,7 @@ const pending = asyncHandler(async (req, res) => {
     if (!reports.length) return res.json({ success: true, data: [], meta: { total: 0 } });
     scopeClause = db`and l.employee_id = any(${reports}::uuid[])`;
   } else if (req.user.role === 'admin') {
-    scopeClause = db``;
+    scopeClause = noFilter();
   } else {
     throw ApiError.forbidden('Only managers and admins have an approval queue');
   }
@@ -329,7 +329,7 @@ const calendar = asyncHandler(async (req, res) => {
            ${db.unsafe(employeeMini('e'))} as "employee"
     from leave_requests l join employees e on e.id = l.employee_id
     where l.status = 'approved' and l.start_date <= ${to} and l.end_date >= ${from}
-      ${visible === null ? db`` : db`and l.employee_id = any(${visible}::uuid[])`}
+      ${visible === null ? noFilter() : db`and l.employee_id = any(${visible}::uuid[])`}
     order by l.start_date`;
 
   res.json({ success: true, data });

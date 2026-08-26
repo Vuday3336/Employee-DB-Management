@@ -1,5 +1,5 @@
 'use strict';
-const { db } = require('../db');
+const { db, noFilter } = require('../db');
 const { LEAVE_COLS, REVIEW_COLS, ATTENDANCE_COLS, employeeMini } = require('../db/shapes');
 const asyncHandler = require('../utils/asyncHandler');
 const scopeService = require('../services/scopeService');
@@ -18,7 +18,7 @@ const today = () => dayjs.utc().format('YYYY-MM-DD');
  */
 const overview = asyncHandler(async (req, res) => {
   const scope = await scopeService.visibleEmployeeIds(req.user);
-  const inScope = (col) => (scope === null ? db`` : db`and ${db.unsafe(col)} = any(${scope}::uuid[])`);
+  const inScope = (col) => (scope === null ? noFilter() : db`and ${db.unsafe(col)} = any(${scope}::uuid[])`);
 
   // Sequential rather than Promise.all: the pool is capped at one connection on
   // serverless, so "parallel" queries only queue behind each other anyway, and

@@ -1,5 +1,5 @@
 'use strict';
-const { db } = require('../db');
+const { db, noFilter } = require('../db');
 const { ATTENDANCE_COLS } = require('../db/shapes');
 const ApiError = require('../utils/ApiError');
 const asyncHandler = require('../utils/asyncHandler');
@@ -112,7 +112,7 @@ function rangeClause(q) {
   if (q.from && q.to) return db`and a.date between ${day(q.from)} and ${day(q.to)}`;
   if (q.from) return db`and a.date >= ${day(q.from)}`;
   if (q.to) return db`and a.date <= ${day(q.to)}`;
-  return db``;
+  return noFilter();
 }
 
 /** GET /api/attendance — scoped, filterable attendance log. */
@@ -126,11 +126,11 @@ const list = asyncHandler(async (req, res) => {
     scopeClause = db`and a.employee_id = ${id}`;
   } else {
     const visible = await scopeService.visibleEmployeeIds(req.user);
-    scopeClause = visible === null ? db`` : db`and a.employee_id = any(${visible}::uuid[])`;
+    scopeClause = visible === null ? noFilter() : db`and a.employee_id = any(${visible}::uuid[])`;
   }
 
   const where = db`where true ${scopeClause} ${rangeClause(q)} ${
-    q.status ? db`and a.status = ${q.status}` : db``
+    q.status ? db`and a.status = ${q.status}` : noFilter()
   }`;
 
   const [items, [{ count }]] = await Promise.all([
@@ -242,7 +242,7 @@ const exportCsv = asyncHandler(async (req, res) => {
     scopeClause = db`and a.employee_id = ${id}`;
   } else {
     const visible = await scopeService.visibleEmployeeIds(req.user);
-    scopeClause = visible === null ? db`` : db`and a.employee_id = any(${visible}::uuid[])`;
+    scopeClause = visible === null ? noFilter() : db`and a.employee_id = any(${visible}::uuid[])`;
   }
 
   const rows = await db`
@@ -278,7 +278,7 @@ const teamToday = asyncHandler(async (req, res) => {
     from employees e
     left join attendance a on a.employee_id = e.id and a.date = ${today()}
     where e.deleted_at is null and e.status <> 'terminated'
-      ${visible === null ? db`` : db`and e.id = any(${visible}::uuid[])`}
+      ${visible === null ? noFilter() : db`and e.id = any(${visible}::uuid[])`}
     order by e.first_name`;
 
   res.json({ success: true, data });

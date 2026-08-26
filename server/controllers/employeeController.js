@@ -1,5 +1,5 @@
 'use strict';
-const { db } = require('../db');
+const { db, noFilter } = require('../db');
 const { EMPLOYEE_FULL, EMPLOYEE_JOINS } = require('../db/shapes');
 const ApiError = require('../utils/ApiError');
 const asyncHandler = require('../utils/asyncHandler');
@@ -53,17 +53,17 @@ function listWhere(visible, q, isAdmin) {
 
   return db`
     where true
-      ${includeDeleted ? db`` : db`and e.deleted_at is null`}
-      ${visible === null ? db`` : db`and e.id = any(${visible}::uuid[])`}
-      ${q.department ? db`and e.department_id = ${q.department}` : db``}
-      ${q.status ? db`and e.status = ${q.status}` : db``}
-      ${q.employmentType ? db`and e.employment_type = ${q.employmentType}` : db``}
-      ${q.manager ? db`and e.manager_id = ${q.manager}` : db``}
+      ${includeDeleted ? noFilter() : db`and e.deleted_at is null`}
+      ${visible === null ? noFilter() : db`and e.id = any(${visible}::uuid[])`}
+      ${q.department ? db`and e.department_id = ${q.department}` : noFilter()}
+      ${q.status ? db`and e.status = ${q.status}` : noFilter()}
+      ${q.employmentType ? db`and e.employment_type = ${q.employmentType}` : noFilter()}
+      ${q.manager ? db`and e.manager_id = ${q.manager}` : noFilter()}
       ${
         q.q
           ? db`and (e.first_name || ' ' || e.last_name || ' ' || e.work_email || ' ' ||
                     e.job_title || ' ' || e.employee_code) ilike ${'%' + q.q + '%'}`
-          : db``
+          : noFilter()
       }`;
 }
 
@@ -388,8 +388,8 @@ const lookup = asyncHandler(async (req, res) => {
            e.job_title as "jobTitle", e.employee_code as "employeeCode"
     from employees e
     where e.deleted_at is null and e.status <> 'terminated'
-      ${visible === null ? db`` : db`and e.id = any(${visible}::uuid[])`}
-      ${req.query.q ? db`and (e.first_name || ' ' || e.last_name || ' ' || e.employee_code) ilike ${'%' + req.query.q + '%'}` : db``}
+      ${visible === null ? noFilter() : db`and e.id = any(${visible}::uuid[])`}
+      ${req.query.q ? db`and (e.first_name || ' ' || e.last_name || ' ' || e.employee_code) ilike ${'%' + req.query.q + '%'}` : noFilter()}
     order by e.first_name
     limit 100`;
   res.json({ success: true, data: rows });

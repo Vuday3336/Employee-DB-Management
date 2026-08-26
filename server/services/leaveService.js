@@ -1,5 +1,5 @@
 'use strict';
-const { db } = require('../db');
+const { db, noFilter } = require('../db');
 const ApiError = require('../utils/ApiError');
 const { businessDays, dayjs } = require('../utils/dates');
 
@@ -31,7 +31,7 @@ async function assertNoOverlap(employeeId, startDate, endDate, excludeId = null)
       and status in ('pending', 'approved')
       and start_date <= ${day(endDate)}
       and end_date   >= ${day(startDate)}
-      ${excludeId ? db`and id <> ${excludeId}` : db``}
+      ${excludeId ? db`and id <> ${excludeId}` : noFilter()}
     limit 1`;
 
   if (clash) {
