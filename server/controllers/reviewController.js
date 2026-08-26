@@ -112,11 +112,9 @@ const list = asyncHandler(async (req, res) => {
       ${q.year ? db`and r.period_year = ${q.year}` : noFilter()}
       ${q.quarter ? db`and r.period_quarter = ${q.quarter}` : noFilter()}`;
 
-  const [items, [{ count }]] = await Promise.all([
-    db`select ${db.unsafe(SELECT)} from performance_reviews r ${db.unsafe(JOINS)} ${where}
-       order by r.period_year desc, r.period_quarter desc limit ${limit} offset ${skip}`,
-    db`select count(*)::int from performance_reviews r ${where}`,
-  ]);
+  const items = await db`select ${db.unsafe(SELECT)} from performance_reviews r ${db.unsafe(JOINS)} ${where}
+       order by r.period_year desc, r.period_quarter desc limit ${limit} offset ${skip}`;
+  const [{ count }] = await db`select count(*)::int from performance_reviews r ${where}`;
 
   res.json({ success: true, data: items, meta: buildMeta({ page, limit, total: count }) });
 });

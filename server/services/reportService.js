@@ -58,19 +58,17 @@ async function attendanceRate(scopeIds, month = new Date()) {
 
 /** Leave grouped by status, plus a by-type breakdown of approved days. */
 async function leaveBreakdown(scopeIds) {
-  const [byStatus, byType] = await Promise.all([
-    db`
+  const byStatus = await db`
       select l.status, count(*)::int as count, sum(l.days)::float8 as days
       from leave_requests l
       where true ${scoped(scopeIds, 'l.employee_id')}
-      group by l.status`,
-    db`
+      group by l.status`;
+  const byType = await db`
       select l.type, count(*)::int as count, sum(l.days)::float8 as days
       from leave_requests l
       where l.status = 'approved' ${scoped(scopeIds, 'l.employee_id')}
       group by l.type
-      order by sum(l.days) desc`,
-  ]);
+      order by sum(l.days) desc`;
 
   const pending = byStatus.find((s) => s.status === 'pending')?.count || 0;
   return { byStatus, byType, pending };

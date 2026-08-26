@@ -75,11 +75,9 @@ const list = asyncHandler(async (req, res) => {
   const where = listWhere(visible, q, req.user.role === 'admin');
   const order = SORTS[q.sort] || SORTS['-createdAt'];
 
-  const [items, [{ count }]] = await Promise.all([
-    db`select ${db.unsafe(EMPLOYEE_FULL)} from employees e ${db.unsafe(EMPLOYEE_JOINS)} ${where}
-       order by ${db.unsafe(order)} limit ${limit} offset ${skip}`,
-    db`select count(*)::int from employees e ${where}`,
-  ]);
+  const items = await db`select ${db.unsafe(EMPLOYEE_FULL)} from employees e ${db.unsafe(EMPLOYEE_JOINS)} ${where}
+       order by ${db.unsafe(order)} limit ${limit} offset ${skip}`;
+  const [{ count }] = await db`select count(*)::int from employees e ${where}`;
 
   res.json({
     success: true,
@@ -128,14 +126,12 @@ const getOne = asyncHandler(async (req, res) => {
     throw ApiError.notFound('Employee not found');
   }
 
-  const [directReports, [account]] = await Promise.all([
-    db`select e.id as "_id", e.first_name as "firstName", e.last_name as "lastName",
+  const directReports = await db`select e.id as "_id", e.first_name as "firstName", e.last_name as "lastName",
               e.job_title as "jobTitle", e.avatar_url as "avatarUrl", e.employee_code as "employeeCode"
        from employees e where e.manager_id = ${employee._id} and e.deleted_at is null
-       order by e.first_name`,
-    db`select id as "_id", email, role, is_active as "isActive", last_login_at as "lastLoginAt"
-       from users where employee_id = ${employee._id}`,
-  ]);
+       order by e.first_name`;
+  const [account] = await db`select id as "_id", email, role, is_active as "isActive", last_login_at as "lastLoginAt"
+       from users where employee_id = ${employee._id}`;
 
   res.json({
     success: true,

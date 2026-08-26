@@ -26,11 +26,9 @@ const listUsers = asyncHandler(async (req, res) => {
       ${req.query.role ? db`and u.role = ${req.query.role}` : noFilter()}
       ${req.query.q ? db`and u.email ilike ${'%' + req.query.q + '%'}` : noFilter()}`;
 
-  const [items, [{ count }]] = await Promise.all([
-    db`select ${db.unsafe(USER_SELECT)} from users u left join employees e on e.id = u.employee_id
-       ${where} order by u.created_at desc limit ${limit} offset ${skip}`,
-    db`select count(*)::int from users u ${where}`,
-  ]);
+  const items = await db`select ${db.unsafe(USER_SELECT)} from users u left join employees e on e.id = u.employee_id
+       ${where} order by u.created_at desc limit ${limit} offset ${skip}`;
+  const [{ count }] = await db`select count(*)::int from users u ${where}`;
 
   res.json({ success: true, data: items, meta: buildMeta({ page, limit, total: count }) });
 });
@@ -132,12 +130,10 @@ const listAudit = asyncHandler(async (req, res) => {
       ${req.query.actor ? db`and actor_id = ${req.query.actor}` : noFilter()}
       ${req.query.outcome ? db`and outcome = ${req.query.outcome}` : noFilter()}`;
 
-  const [items, [{ count }]] = await Promise.all([
-    db`select id as "_id", actor_email as "actorEmail", actor_role as "actorRole",
+  const items = await db`select id as "_id", actor_email as "actorEmail", actor_role as "actorRole",
               action, entity, entity_id as "entityId", changes, outcome, created_at as "createdAt"
-       from audit_logs ${where} order by created_at desc limit ${limit} offset ${skip}`,
-    db`select count(*)::int from audit_logs ${where}`,
-  ]);
+       from audit_logs ${where} order by created_at desc limit ${limit} offset ${skip}`;
+  const [{ count }] = await db`select count(*)::int from audit_logs ${where}`;
 
   res.json({ success: true, data: items, meta: buildMeta({ page, limit, total: count }) });
 });
@@ -212,13 +208,11 @@ const deleteHoliday = asyncHandler(async (req, res) => {
 /* ---------------------------- notifications ------------------------------ */
 
 const listNotifications = asyncHandler(async (req, res) => {
-  const [items, [{ unread }]] = await Promise.all([
-    db`select id as "_id", type, title, message, link, read_at as "readAt", created_at as "createdAt"
+  const items = await db`select id as "_id", type, title, message, link, read_at as "readAt", created_at as "createdAt"
        from notifications
        where user_id = ${req.user.id} ${req.query.unread === 'true' ? db`and read_at is null` : noFilter()}
-       order by created_at desc limit 50`,
-    db`select count(*)::int as unread from notifications where user_id = ${req.user.id} and read_at is null`,
-  ]);
+       order by created_at desc limit 50`;
+  const [{ unread }] = await db`select count(*)::int as unread from notifications where user_id = ${req.user.id} and read_at is null`;
   res.json({ success: true, data: items, meta: { unread } });
 });
 

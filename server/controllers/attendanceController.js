@@ -133,14 +133,12 @@ const list = asyncHandler(async (req, res) => {
     q.status ? db`and a.status = ${q.status}` : noFilter()
   }`;
 
-  const [items, [{ count }]] = await Promise.all([
-    db`select ${db.unsafe(ATTENDANCE_COLS)},
+  const items = await db`select ${db.unsafe(ATTENDANCE_COLS)},
               json_build_object('_id', e.id, 'firstName', e.first_name, 'lastName', e.last_name,
                                 'employeeCode', e.employee_code, 'jobTitle', e.job_title) as "employee"
        from attendance a join employees e on e.id = a.employee_id
-       ${where} order by a.date desc limit ${limit} offset ${skip}`,
-    db`select count(*)::int from attendance a ${where}`,
-  ]);
+       ${where} order by a.date desc limit ${limit} offset ${skip}`;
+  const [{ count }] = await db`select count(*)::int from attendance a ${where}`;
 
   res.json({ success: true, data: items, meta: buildMeta({ page, limit, total: count }) });
 });
@@ -156,13 +154,11 @@ const calendar = asyncHandler(async (req, res) => {
   const from = base.startOf('month');
   const to = base.endOf('month');
 
-  const [records, holidays] = await Promise.all([
-    db`select ${db.unsafe(ATTENDANCE_COLS)} from attendance a
+  const records = await db`select ${db.unsafe(ATTENDANCE_COLS)} from attendance a
        where a.employee_id = ${employeeId}
-         and a.date between ${from.format('YYYY-MM-DD')} and ${to.format('YYYY-MM-DD')}`,
-    db`select name, date from holidays
-       where date between ${from.format('YYYY-MM-DD')} and ${to.format('YYYY-MM-DD')}`,
-  ]);
+         and a.date between ${from.format('YYYY-MM-DD')} and ${to.format('YYYY-MM-DD')}`;
+  const holidays = await db`select name, date from holidays
+       where date between ${from.format('YYYY-MM-DD')} and ${to.format('YYYY-MM-DD')}`;
 
   const byDate = new Map(records.map((r) => [day(r.date), r]));
   const holidayByDate = new Map(holidays.map((h) => [day(h.date), h]));

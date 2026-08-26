@@ -136,11 +136,9 @@ const list = asyncHandler(async (req, res) => {
       ${q.from ? db`and l.start_date >= ${day(q.from)}` : noFilter()}
       ${q.to ? db`and l.start_date <= ${day(q.to)}` : noFilter()}`;
 
-  const [items, [{ count }]] = await Promise.all([
-    db`select ${db.unsafe(SELECT)} from leave_requests l join employees e on e.id = l.employee_id
-       ${where} order by ${db.unsafe(order)} limit ${limit} offset ${skip}`,
-    db`select count(*)::int from leave_requests l ${where}`,
-  ]);
+  const items = await db`select ${db.unsafe(SELECT)} from leave_requests l join employees e on e.id = l.employee_id
+       ${where} order by ${db.unsafe(order)} limit ${limit} offset ${skip}`;
+  const [{ count }] = await db`select count(*)::int from leave_requests l ${where}`;
 
   res.json({ success: true, data: items, meta: buildMeta({ page, limit, total: count }) });
 });

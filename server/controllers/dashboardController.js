@@ -12,7 +12,7 @@ const today = () => dayjs.utc().format('YYYY-MM-DD');
 
 /**
  * GET /api/dashboard
- * One scoped snapshot, assembled from parallel queries. Every metric is restricted
+ * One scoped snapshot. Every metric is restricted
  * to the caller's visible employee set inside the WHERE clause, so a manager's
  * "headcount" is their team's headcount, not the company's.
  */
@@ -81,23 +81,29 @@ const myOverview = asyncHandler(async (req, res) => {
   const employeeId = req.user.employee;
   if (!employeeId) return res.json({ success: true, data: { linked: false } });
 
-  const [[attendanceToday], balances, upcomingLeave, [latestReview], monthSummary, [{ pending }]] =
-    await Promise.all([
-      db`select ${db.unsafe(ATTENDANCE_COLS)} from attendance a
-         where a.employee_id = ${employeeId} and a.date = ${today()}`,
-      leaveService.balanceSummary(employeeId),
-      db`select ${db.unsafe(LEAVE_COLS)} from leave_requests l
-         where l.employee_id = ${employeeId} and l.status in ('pending','approved')
-           and l.end_date >= ${today()}
-         order by l.start_date limit 5`,
-      db`select ${db.unsafe(REVIEW_COLS)}, ${db.unsafe(employeeMini('rv'))} as "reviewer"
-         from performance_reviews r join employees rv on rv.id = r.reviewer_id
-         where r.employee_id = ${employeeId} and r.status in ('submitted','acknowledged')
-         order by r.period_year desc, r.period_quarter desc limit 1`,
-      reportService.monthlyAttendanceSummary(employeeId),
-      db`select count(*)::int as pending from leave_requests
-         where employee_id = ${employeeId} and status = 'pending'`,
-    ]);
+  const [attendanceToday] = await db`
+    select ${db.unsafe(ATTENDANCE_COLS)} from attendance a
+    where a.employee_id = ${employeeId} and a.date = ${today()}`;
+
+  const balances = await leaveService.balanceSummary(employeeId);
+
+  const upcomingLeave = await db`
+    select ${db.unsafe(LEAVE_COLS)} from leave_requests l
+    where l.employee_id = ${employeeId} and l.status in ('pending','approved')
+      and l.end_date >= ${today()}
+    order by l.start_date limit 5`;
+
+  const [latestReview] = await db`
+    select ${db.unsafe(REVIEW_COLS)}, ${db.unsafe(employeeMini('rv'))} as "reviewer"
+    from performance_reviews r join employees rv on rv.id = r.reviewer_id
+    where r.employee_id = ${employeeId} and r.status in ('submitted','acknowledged')
+    order by r.period_year desc, r.period_quarter desc limit 1`;
+
+  const monthSummary = await reportService.monthlyAttendanceSummary(employeeId);
+
+  const [{ pending }] = await db`
+    select count(*)::int as pending from leave_requests
+    where employee_id = ${employeeId} and status = 'pending'`;
 
   res.json({
     success: true,
