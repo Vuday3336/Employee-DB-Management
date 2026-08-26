@@ -213,6 +213,7 @@ in **[docs/deployment.md](./docs/deployment.md)**.
 
 | Document | Contents |
 |---|---|
+| **[docs/build-report.md](./docs/build-report.md)** | The record of the project: stack decisions, the migration, three production bugs and how they were found, what is verified and what is not |
 | **[docs/rbac.md](./docs/rbac.md)** | How authorization is enforced at the API layer — the three-layer chain, recursive scope resolution, field redaction, and honest limitations |
 | **[docs/api_endpoints.md](./docs/api_endpoints.md)** | Every endpoint with required roles, query parameters, status codes and examples |
 | **[docs/er_diagram.md](./docs/er_diagram.md)** | Schema relationships, the reasoning behind each modelling decision, and the index list |
